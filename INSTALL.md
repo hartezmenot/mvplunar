@@ -31,3 +31,7 @@ sudo apt install ./mvp-lunar_1.0.0_amd64.deb
 ```
 http://<YOUR_LOCAL_IP>:1130
 ```
+
+## Support the Project
+
+Support the project: https://ko-fi.com/hartezmenot
