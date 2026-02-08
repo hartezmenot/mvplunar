@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MVP LUNAR</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark">MVP</div>
+          <div class="brand-name">LUNAR</div>
+        </div>
+        <nav class="nav">
+          <button class="nav-item active" data-tab="sonar">Mix</button>
+          <button class="nav-item" data-tab="routing">Routing</button>
+          <button class="nav-item" data-tab="soundboard">Soundboard</button>
+          <button class="nav-item" data-tab="settings">Settings</button>
+        </nav>
+        <div class="status-group">
+          <button class="status-pill stream-btn" id="streamToggle">Stream Mode Off</button>
+          <div class="status-pill app-name" id="appName">MVP LUNAR</div>
+          <div class="status-pill" id="syncStatus">Local</div>
+          <div class="status-pill remote-pill hidden" id="remoteBadge">Remote</div>
+        </div>
+      </header>
+
+      <main class="main">
+        <header class="page-header">
+          <div class="page-title" id="pageTitle">Mix</div>
+          <div class="page-subtitle">Touch control panel</div>
+        </header>
+
+        <section class="page" id="page-sonar">
+          <div class="panel-grid">
+            <div class="panel">
+              <div class="panel-title">Mix</div>
+              <div class="sink-grid">
+                <div class="sink-card" data-sink="browser">
+                  <div class="sink-label">Browser/Music</div>
+                  <div class="sink-controls two">
+                    <button class="sink-btn mute-btn" data-action="mute" data-sink="browser">Mute</button>
+                    <button class="sink-btn clip-btn" data-action="clip" data-sink="browser">Link</button>
+                  </div>
+                  <input class="rocker-range sink-slider" type="range" min="0" max="100" value="65" data-channel="browser" />
+                  <div class="sink-percent" data-percent="browser">Volume 65%</div>
+                </div>
+                <div class="sink-card" data-sink="game">
+                  <div class="sink-label">Game</div>
+                  <div class="sink-controls two">
+                    <button class="sink-btn mute-btn" data-action="mute" data-sink="game">Mute</button>
+                    <button class="sink-btn clip-btn" data-action="clip" data-sink="game">Link</button>
+                  </div>
+                  <input class="rocker-range sink-slider" type="range" min="0" max="100" value="70" data-channel="game" />
+                  <div class="sink-percent" data-percent="game">Volume 70%</div>
+                </div>
+                <div class="sink-card" data-sink="chat_fx">
+                  <div class="sink-label">Chat</div>
+                  <div class="sink-controls two">
+                    <button class="sink-btn mute-btn" data-action="mute" data-sink="chat_fx">Mute</button>
+                    <button class="sink-btn clip-btn" data-action="clip" data-sink="chat_fx">Link</button>
+                  </div>
+                  <input class="rocker-range sink-slider" type="range" min="0" max="100" value="60" data-channel="chat" />
+                  <div class="sink-percent" data-percent="chat">Volume 60%</div>
+                </div>
+                <div class="sink-card" data-sink="mic">
+                  <div class="sink-label">Mic Input</div>
+                  <div class="sink-controls two">
+                    <button class="sink-btn mute-btn" data-action="mute" data-sink="mic">Mute</button>
+                    <button class="sink-btn clip-btn" data-action="clip" data-sink="mic">Link</button>
+                  </div>
+                  <input class="rocker-range sink-slider" type="range" min="0" max="100" value="68" data-channel="mic" />
+                  <div class="sink-percent" data-percent="mic">Volume 68%</div>
+                </div>
+                <div class="sink-card" data-sink="soundboard">
+                  <div class="sink-label">Soundboard</div>
+                  <div class="sink-controls two">
+                    <button class="sink-btn mute-btn" data-action="mute" data-sink="soundboard">Mute</button>
+                    <button class="sink-btn miclink-btn" data-action="miclink" data-sink="soundboard">Mic Link</button>
+                  </div>
+                  <input class="rocker-range sink-slider" type="range" min="0" max="100" value="55" data-channel="soundboard" />
+                  <div class="sink-percent" data-percent="soundboard">Volume 55%</div>
+                </div>
+                <div class="sink-card stream-card stream-only" data-sink="stream">
+                  <div class="sink-label">Stream</div>
+                  <div class="sink-controls one">
+                    <button class="sink-btn mute-btn" data-action="mute" data-sink="stream">Mute</button>
+                  </div>
+                  <input class="rocker-range sink-slider" type="range" min="0" max="100" value="65" data-channel="stream" />
+                  <div class="sink-percent" data-percent="stream">Volume 65%</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="page hidden" id="page-settings">
+          <div class="panel-grid">
+            <div class="panel settings-panel">
+              <div class="panel-title">Settings</div>
+              <div class="settings-grid">
+                <div class="settings-section">
+                  <div class="section-title">Output</div>
+                  <div class="row">
+                    <label>Output Device</label>
+                    <select id="systemOutput"></select>
+                  </div>
+                  <div class="row">
+                    <label>Stream Monitor Output</label>
+                    <select id="streamOutput"></select>
+                  </div>
+                  <div class="row">
+                    <label>Test Tone</label>
+                    <div class="btn-group">
+                      <button class="ghost" id="testLeft">Left</button>
+                      <button class="ghost" id="testBoth">Both</button>
+                      <button class="ghost" id="testRight">Right</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="settings-section">
+                  <div class="section-title">Input</div>
+                  <div class="row">
+                    <label>Input Device</label>
+                    <select id="systemInput"></select>
+                  </div>
+                  <div class="row">
+                    <label>Mic Monitor</label>
+                    <button class="ghost" id="monitorMic">Monitor Mic</button>
+                  </div>
+                  <div class="row">
+                    <label>Mic Noise Engine</label>
+                    <select id="noiseEngine">
+                      <option value="rnnoise">RNNoise (LV2)</option>
+                      <option value="ai">AI Anti-Noise (Placeholder)</option>
+                      <option value="off">Off</option>
+                    </select>
+                  </div>
+                  <div class="row">
+                    <label>Mic RNN</label>
+                    <button class="ghost toggle" id="rnnToggle">Off</button>
+                  </div>
+                  <div class="row">
+                    <label>Mic Noise Gate</label>
+                    <div class="gate-row">
+                      <button class="ghost toggle" id="gateToggle">Off</button>
+                      <input id="gateThreshold" type="range" min="0" max="100" value="45" />
+                    </div>
+                  </div>
+                  <div class="row">
+                    <label>Mic FX</label>
+                    <button class="ghost toggle" id="micFxToggle">On</button>
+                  </div>
+                  <div class="row">
+                    <label>Mic FX Gain</label>
+                    <input id="micFxGain" type="range" min="50" max="150" value="100" />
+                  </div>
+                </div>
+                <div class="settings-section">
+                  <div class="section-title">Chat FX</div>
+                  <div class="row">
+                    <label>Chat Noise Engine</label>
+                    <select id="chatNoiseEngine">
+                      <option value="rnnoise">RNNoise (LV2)</option>
+                      <option value="ai">AI Anti-Noise (Placeholder)</option>
+                      <option value="off">Off</option>
+                    </select>
+                  </div>
+                  <div class="row">
+                    <label>Chat RNN</label>
+                    <button class="ghost toggle" id="chatRnnToggle">Off</button>
+                  </div>
+                  <div class="row">
+                    <label>Chat FX Gain</label>
+                    <input id="chatFxGain" type="range" min="50" max="150" value="100" />
+                  </div>
+                  <div class="row">
+                    <label title="Blends original chat audio with FX output. 0% = dry, 100% = full FX.">Chat FX Mix (Dry/Wet)</label>
+                    <input id="chatFxMix" type="range" min="0" max="100" value="100" />
+                  </div>
+                  <div class="row">
+                    <label>Gate Test</label>
+                    <button class="ghost toggle" id="chatGateTest">Off</button>
+                  </div>
+                  <div class="row">
+                    <label>Chat Noise Gate</label>
+                    <div class="gate-row">
+                      <button class="ghost toggle" id="chatGateToggle">Off</button>
+                      <input id="chatGateThreshold" type="range" min="0" max="100" value="45" />
+                    </div>
+                  </div>
+                  <div class="row hint">
+                    <span>System-wide RNN/Noise Gate requires PipeWire RNNoise plugin.</span>
+                  </div>
+                  <div class="row">
+                    <label>Apply FX</label>
+                    <button class="ghost" id="applyFx">Apply FX (Restart Audio)</button>
+                  </div>
+                </div>
+                <div class="settings-section">
+                  <div class="section-title">Web PIN</div>
+                  <div class="row">
+                    <label>Web PIN</label>
+                    <div class="pin-panel" id="pinPanel">
+                      <div class="pin-value" id="pinValue">••••</div>
+                      <button class="ghost pin-btn" id="pinToggle">Show</button>
+                      <button class="ghost pin-btn" id="pinRefresh">Refresh</button>
+                      <button class="ghost pin-btn" id="pinCopy">Copy</button>
+                    </div>
+                  </div>
+                  <div class="row">
+                    <label>LAN Access</label>
+                    <div class="gate-row">
+                      <button class="ghost toggle" id="lanToggle">Disabled</button>
+                      <button class="ghost" id="lanRestart">Restart Web</button>
+                    </div>
+                  </div>
+                  <div class="row hint" id="lanInfoRow">
+                    <span id="lanInfo">LAN access is disabled.</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="page hidden" id="page-soundboard">
+          <div class="soundboard-header">
+            <div class="sb-tabs" id="sbTabs"></div>
+            <div class="sb-actions">
+              <button class="ghost" id="addSound">+ Sound</button>
+              <button class="ghost" id="addCategory">+ Category</button>
+              <button class="ghost" id="renameCategory">Rename Tab</button>
+              <button class="ghost" id="deleteCategory">Delete Tab</button>
+            </div>
+          </div>
+
+          <div class="soundboard-body">
+            <div class="soundboard-grid" id="soundboardGrid"></div>
+            <div class="soundboard-master" id="soundboardMasterWrap">
+              <div class="soundboard-master-title">Soundboard Volume</div>
+              <input class="rocker-range soundboard-master-slider" id="soundboardMaster" type="range" min="0" max="100" value="100" />
+              <div class="soundboard-master-value" id="soundboardMasterValue">100%</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="page hidden" id="page-routing">
+          <div class="panel-grid">
+            <div class="panel">
+              <div class="panel-title">Active Apps</div>
+              <div class="routing-list" id="routingList"></div>
+            </div>
+          </div>
+        </section>
+      </main>
+      <div class="pin-gate hidden" id="pinGate">
+        <div class="pin-gate-card">
+          <div class="pin-gate-title">Enter PIN</div>
+          <div class="pin-gate-sub">This dashboard is locked.</div>
+          <input id="pinGateInput" type="password" inputmode="numeric" maxlength="4" placeholder="4-digit PIN" />
+          <button class="ghost" id="pinGateSubmit">Unlock</button>
+          <div class="pin-gate-error" id="pinGateError"></div>
+        </div>
+      </div>
+    </div>
+
+    <template id="slotTemplate">
+      <div class="slot">
+        <div class="slot-top">
+          <div class="slot-name">Empty</div>
+        </div>
+        <div class="slot-actions">
+          <button class="play">Play</button>
+          <button class="stop">Stop</button>
+        </div>
+        <div class="slot-volume">
+          <button class="slot-vol-minus">-</button>
+          <span class="slot-vol-value">100%</span>
+          <button class="slot-vol-plus">+</button>
+        </div>
+        <div class="slot-add">
+          <button class="plus">+</button>
+        </div>
+        <div class="slot-edit">
+          <button class="edit">Edit</button>
+          <button class="delete">Delete</button>
+        </div>
+      </div>
+    </template>
+
+    <input type="file" id="filePicker" accept="audio/*" hidden />
+    <div class="overlay hidden" id="soundMeta">
+      <div class="overlay-card">
+        <div class="overlay-title" id="soundMetaTitle">Add Sound</div>
+        <div class="overlay-sub">Choose a name.</div>
+        <div class="sound-meta-row">
+          <label for="soundNameInput">Name</label>
+          <input id="soundNameInput" type="text" placeholder="Sound name" />
+        </div>
+        <div class="sound-meta-row hidden" id="soundCategoryRow">
+          <label for="soundCategorySelect">Category</label>
+          <select id="soundCategorySelect"></select>
+        </div>
+        <div class="sound-meta-actions">
+          <button class="ghost" id="soundMetaCancel">Cancel</button>
+          <button class="ghost" id="soundMetaSave">Save</button>
+        </div>
+      </div>
+    </div>
+    <div class="overlay hidden" id="categoryModal">
+      <div class="overlay-card">
+        <div class="overlay-title" id="categoryModalTitle">Add Category</div>
+        <div class="overlay-sub">Name your tab.</div>
+        <div class="sound-meta-row">
+          <label for="categoryNameInput">Name</label>
+          <input id="categoryNameInput" type="text" placeholder="Category name" />
+        </div>
+        <div class="sound-meta-actions">
+          <button class="ghost" id="categoryModalCancel">Cancel</button>
+          <button class="ghost" id="categoryModalSave">Save</button>
+        </div>
+      </div>
+    </div>
+    <script src="app.js"></script>
+  </body>
+</html>

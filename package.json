@@ -1,0 +1,45 @@
+{
+  "name": "mvp-lunar",
+  "version": "1.0.0",
+  "description": "MVP Lunar audio mixer and soundboard controller",
+  "homepage": "https://github.com/hartezmenot/mvp-lunar",
+  "author": {
+    "name": "hartezmenot",
+    "email": "chaox.league@gmail.com"
+  },
+  "private": true,
+  "type": "commonjs",
+  "main": "electron-main.js",
+  "scripts": {
+    "start": "node server.js",
+    "app": "electron .",
+    "app:dev": "ELECTRON_OZONE_PLATFORM_HINT=auto electron .",
+    "app:linux": "ELECTRON_OZONE_PLATFORM_HINT=auto electron .",
+    "build:appimage": "electron-builder --linux AppImage",
+    "build:deb": "electron-builder --linux deb",
+    "build:linux": "electron-builder --linux AppImage deb"
+  },
+  "devDependencies": {
+    "electron": "^31.3.1",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.mvp.lunar",
+    "productName": "MVP Lunar",
+    "icon": "assets/icon.png",
+    "linux": {
+      "maintainer": "hartezmenot <chaox.league@gmail.com>",
+      "icon": "assets/icon.png",
+      "desktop": {
+        "Name": "MVP Lunar",
+        "Comment": "Audio mixer and soundboard controller",
+        "Categories": "AudioVideo;Audio"
+      },
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "AudioVideo;Audio"
+    }
+  }
+}

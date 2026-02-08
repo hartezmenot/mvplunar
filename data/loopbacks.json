@@ -1,0 +1,7 @@
+{
+  "browser.monitor": "alsa_output.usb-BEHRINGER_UMC202HD_192k-00.HiFi__Line__sink",
+  "game.monitor": "alsa_output.usb-BEHRINGER_UMC202HD_192k-00.HiFi__Line__sink",
+  "soundboard.monitor": "alsa_output.usb-BEHRINGER_UMC202HD_192k-00.HiFi__Line__sink",
+  "chat.monitor": "alsa_output.usb-BEHRINGER_UMC202HD_192k-00.HiFi__Line__sink",
+  "chat_fx_output": "alsa_output.usb-BEHRINGER_UMC202HD_192k-00.HiFi__Line__sink"
+}
