@@ -2,6 +2,14 @@
 
 This project ships as both an AppImage and a Debian package.
 
+## Requirements
+
+- PipeWire audio stack
+- `pipewire-pulse` (PulseAudio compatibility)
+- `wireplumber` session manager
+- RNNoise LV2 plugin for noise suppression (optional, but required for the RNNoise toggle):
+  - `noise-suppression-for-voice` (package name varies by distro)
+
 ## AppImage (CachyOS / Arch-based)
 
 ```

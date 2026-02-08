@@ -16,6 +16,14 @@ Inspired by SteelSeries GG Sonar and VoiceMeeter, MVP Lunar is an all-in-one mix
 - Wayland: Fully supported and primary testing environment (best experience).
 - X11 / Xorg: Currently untested. If you run an X11 session, we would love your feedback and bug reports to help reach perfection.
 
+## ✅ Requirements
+
+- PipeWire audio stack
+- `pipewire-pulse` (PulseAudio compatibility)
+- `wireplumber` session manager
+- RNNoise LV2 plugin for noise suppression (optional, but required for the RNNoise toggle):
+  - `noise-suppression-for-voice` (package name varies by distro)
+
 ## 🛠 Setup & Remote Access
 
 - Enable LAN: Navigate to Settings and toggle the LAN settings to "On."
