@@ -42,6 +42,17 @@ Support the project: https://ko-fi.com/hartezmenot
 
 Feedback is welcome! Please do not be afraid to comment or open an issue if you find anything that isn't perfect.
 
+## ✅ Release Notes
+
+### 1.0.1
+
+- Cleaner UI polish across the main panels.
+- PIN display streamlined (tap/hover to reveal).
+- Audio status banner for pactl availability and retry timing.
+- Peak meter behavior fixes and consistent dB styling.
+- Stream meter now reflects linked sources.
+- Routing overrides to prevent sinks snapping back.
+
 ## Desktop Entry
 
 On most Linux systems, the AppImage will prompt to integrate into your app menu. If not, you can still run it directly.

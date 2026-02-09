@@ -1,1 +1,1 @@
-@DEFAULT_SOURCE@
+alsa_input.usb-BEHRINGER_UMC202HD_192k-00.HiFi__Mic1__source

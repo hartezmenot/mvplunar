@@ -31,7 +31,6 @@ const systemOutput = document.getElementById("systemOutput");
 const systemInput = document.getElementById("systemInput");
 const streamOutput = document.getElementById("streamOutput");
 const pinValue = document.getElementById("pinValue");
-const pinToggle = document.getElementById("pinToggle");
 const pinRefresh = document.getElementById("pinRefresh");
 const pinCopy = document.getElementById("pinCopy");
 const lanToggle = document.getElementById("lanToggle");
@@ -42,10 +41,17 @@ const pinGateInput = document.getElementById("pinGateInput");
 const pinGateSubmit = document.getElementById("pinGateSubmit");
 const pinGateError = document.getElementById("pinGateError");
 const remoteBadge = document.getElementById("remoteBadge");
+const audioStatus = document.getElementById("audioStatus");
+const audioStatusText = audioStatus?.querySelector(".status-banner-text") || null;
 const isRemote = (() => {
   const host = window.location.hostname;
   return host && host !== "127.0.0.1" && host !== "localhost";
 })();
+const isElectron = /Electron/i.test(navigator.userAgent || "");
+if (document.body) {
+  document.body.classList.toggle("electron-app", isElectron);
+  document.body.classList.toggle("web-app", !isElectron);
+}
 
 const POLL_STATE_MS = 2500;
 const SOUND_QUEUE_MS = 800;
@@ -53,6 +59,77 @@ const ROUTING_POLL_MS = 3000;
 
 function shouldPoll() {
   return !document.hidden;
+}
+
+let audioAvailable = true;
+const routingEnforceAt = new Map();
+
+function setAudioStatus(message) {
+  if (!audioStatus) return;
+  if (message) {
+    if (audioStatusText) {
+      audioStatusText.textContent = message;
+    } else {
+      audioStatus.textContent = message;
+    }
+    audioStatus.classList.remove("hidden");
+  } else {
+    audioStatus.classList.add("hidden");
+  }
+}
+
+function startAudioStatusPoll() {
+  if (!audioStatus) return;
+  const poll = async () => {
+    try {
+      const res = await fetch("/api/audio-status", { cache: "no-store" });
+      const data = await res.json();
+      if (!data?.ok) {
+        audioAvailable = false;
+        setAudioStatus("Audio status unknown.");
+        return;
+      }
+      if (!data.pactlAvailable) {
+        audioAvailable = false;
+        const err = data.pactlLastError ? ` (${data.pactlLastError})` : "";
+        const wait = Number.isFinite(data.pactlRetryInSec) && data.pactlRetryInSec > 0
+          ? ` Retry in ${data.pactlRetryInSec}s.`
+          : "";
+        setAudioStatus(`Audio service down: pactl unavailable${err}.${wait}`);
+        return;
+      }
+      audioAvailable = true;
+      setAudioStatus("");
+    } catch {
+      audioAvailable = false;
+      setAudioStatus("Audio service unreachable.");
+    }
+  };
+  poll();
+  setInterval(poll, 3000);
+}
+
+function setSinkLabel(key, percent, currentDb, peakDb) {
+  const labels = Array.from(document.querySelectorAll(`.sink-percent[data-percent="${key}"]`));
+  labels.forEach((label) => {
+    let volEl = label.querySelector(".sink-vol");
+    let dbEl = label.querySelector(".sink-db");
+    if (!volEl || !dbEl) {
+      label.innerHTML = "";
+      volEl = document.createElement("div");
+      volEl.className = "sink-vol";
+      dbEl = document.createElement("div");
+      dbEl.className = "sink-db";
+      label.appendChild(volEl);
+      label.appendChild(dbEl);
+    }
+    volEl.textContent = `Volume ${percent}%`;
+    if (Number.isFinite(currentDb)) {
+      const cur = Math.round(currentDb);
+      const peak = Number.isFinite(peakDb) ? Math.round(peakDb) : null;
+      dbEl.textContent = peak === null ? `${cur} dB` : `${cur} dB | ${peak} dB`;
+    }
+  });
 }
 
 if (remoteBadge) {
@@ -63,6 +140,19 @@ if (remoteBadge) {
   }
 }
 
+let pinRevealLocked = false;
+function showPinValue() {
+  if (!pinValue) return;
+  const pin = pinValue.dataset.pin || "";
+  pinValue.textContent = pin || "••••";
+}
+
+function hidePinValue() {
+  if (!pinValue) return;
+  if (pinRevealLocked) return;
+  pinValue.textContent = "••••";
+}
+
 const defaultState = {
   categories: [
     { name: "Memes", slots: Array.from({ length: 9 }, () => emptySlot()) },
@@ -70,6 +160,8 @@ const defaultState = {
   ],
   activeCategory: 0,
   updatedAt: 0,
+  volumeUpdatedAt: 0,
+  sinkVolumes: {},
   inputDeviceId: "",
   outputDeviceId: "",
   gameSinkId: "",
@@ -95,6 +187,7 @@ const defaultState = {
     soundboard: false,
     stream: false,
   },
+  routingOverrides: {},
   audioSettings: {
     rnnEnabled: false,
     gateEnabled: false,
@@ -140,8 +233,10 @@ const filePicker = document.getElementById("filePicker");
 const slotTemplate = document.getElementById("slotTemplate");
 const soundMeta = document.getElementById("soundMeta");
 const soundNameInput = document.getElementById("soundNameInput");
+const soundBindInput = document.getElementById("soundBindInput");
 const soundMetaCancel = document.getElementById("soundMetaCancel");
 const soundMetaSave = document.getElementById("soundMetaSave");
+const soundMetaDelete = document.getElementById("soundMetaDelete");
 const soundMetaTitle = document.getElementById("soundMetaTitle");
 const soundCategoryRow = document.getElementById("soundCategoryRow");
 const soundCategorySelect = document.getElementById("soundCategorySelect");
@@ -208,6 +303,8 @@ function loadState() {
     const parsed = JSON.parse(raw);
     if (!parsed.categories?.length) return structuredClone(defaultState);
     if (typeof parsed.updatedAt !== "number") parsed.updatedAt = 0;
+    if (typeof parsed.volumeUpdatedAt !== "number") parsed.volumeUpdatedAt = 0;
+    if (!parsed.sinkVolumes || typeof parsed.sinkVolumes !== "object") parsed.sinkVolumes = {};
     if (parsed.streamLinks?.chat_fx && !parsed.streamLinks?.chat) {
       parsed.streamLinks.chat = parsed.streamLinks.chat_fx;
       delete parsed.streamLinks.chat_fx;
@@ -235,6 +332,10 @@ function loadState() {
         ...structuredClone(defaultState.mutedSinks),
         ...parsed.mutedSinks,
       },
+      sinkVolumes: {
+        ...structuredClone(defaultState.sinkVolumes),
+        ...parsed.sinkVolumes,
+      },
     };
     normalized.categories = (normalized.categories || []).map((cat) => ({
       ...cat,
@@ -249,8 +350,11 @@ function loadState() {
   }
 }
 
-function saveState() {
-  state.updatedAt = Date.now();
+function saveState(options = {}) {
+  const touchUpdatedAt = options.touchUpdatedAt !== false;
+  const touchVolume = options.touchVolume === true;
+  if (touchUpdatedAt) state.updatedAt = Date.now();
+  if (touchVolume) state.volumeUpdatedAt = Date.now();
   localStorage.setItem(stateKey, JSON.stringify(state));
   if (serverAvailable) pushStateToServer();
 }
@@ -297,7 +401,7 @@ function renderGrid() {
     const stopBtn = node.querySelector(".stop");
     const plusBtns = node.querySelectorAll(".plus");
     const editBtn = node.querySelector(".edit");
-    const deleteBtn = node.querySelector(".delete");
+    const deleteBtn = null;
     const volValue = node.querySelector(".slot-vol-value");
     const volMinus = node.querySelector(".slot-vol-minus");
     const volPlus = node.querySelector(".slot-vol-plus");
@@ -305,7 +409,15 @@ function renderGrid() {
     const isFilled = Boolean(slot.name && slot.audioData);
     node.classList.add(isFilled ? "filled" : "empty");
     nameEl.textContent = slot.name || "Empty";
-    if (bindEl) bindEl.remove();
+    if (bindEl) {
+      if (slot.bind) {
+        bindEl.textContent = `Bind: ${slot.bind}`;
+        bindEl.classList.remove("hidden");
+      } else {
+        bindEl.textContent = "";
+        bindEl.classList.add("hidden");
+      }
+    }
     if (volValue) volValue.textContent = `${clampPercent(slot.volume)}%`;
 
     plusBtns.forEach((btn) => {
@@ -648,6 +760,9 @@ function renderSinkControls() {
     btn.classList.toggle("active", linked);
     btn.textContent = linked ? "Mic On" : "Mic";
   });
+  const soundboardMuted = Boolean(state.mutedSinks?.soundboard);
+  const masterValue = clampPercent(state.sinkVolumes?.soundboard ?? getSoundboardVolume());
+  setActiveSoundboardVolume(soundboardMuted ? 0 : masterValue);
   // Chat-to-mic removed.
 }
 
@@ -662,6 +777,7 @@ async function refreshPin(forceRefresh = false) {
     const pin = String(data?.pin || "").trim();
     if (!pinValue) return;
     pinValue.dataset.pin = pin;
+    pinRevealLocked = false;
     pinValue.textContent = "••••";
   } catch {
     // ignore
@@ -736,6 +852,10 @@ async function initServerSync() {
     startSoundboardQueue();
   }
 
+  if (serverAvailable && !isRemote) {
+    ensureLoopbacksOnce();
+  }
+
   setInterval(() => {
     if (!serverAvailable) return;
     if (!shouldPoll()) return;
@@ -743,8 +863,54 @@ async function initServerSync() {
   }, POLL_STATE_MS);
 }
 
+let loopbackBootstrapped = false;
+async function ensureLoopbacksOnce() {
+  if (loopbackBootstrapped) return;
+  loopbackBootstrapped = true;
+  try {
+    let sink = state.systemOutputSink || "";
+    if (!sink) {
+      const res = await fetch("/api/default-sink", { cache: "no-store" });
+      const data = await res.json();
+      sink = data?.sink || "";
+    }
+    if (!sink) return;
+    await fetch("/api/loopback-default", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sink }),
+    });
+  } catch {
+    // ignore
+  }
+}
+
 let soundboardQueueTimer = null;
 let soundboardQueueBusy = false;
+let soundboardRouteTimer = null;
+
+function scheduleSoundboardRoute() {
+  if (isRemote) return;
+  if (!serverAvailable) return;
+  if (soundboardRouteTimer) return;
+  soundboardRouteTimer = setTimeout(async () => {
+    soundboardRouteTimer = null;
+    try {
+      const res = await fetch("/api/mvp-sink-inputs", { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json();
+      const ids = Array.isArray(data?.ids) ? data.ids : [];
+      if (!ids.length) return;
+      await fetch("/api/move-sink-input", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids, sink: "soundboard" }),
+      });
+    } catch {
+      // ignore
+    }
+  }, 200);
+}
 
 function startSoundboardQueue() {
   if (isRemote) return;
@@ -752,7 +918,6 @@ function startSoundboardQueue() {
   if (soundboardQueueTimer) return;
   soundboardQueueTimer = setInterval(async () => {
     if (soundboardQueueBusy) return;
-    if (!shouldPoll()) return;
     soundboardQueueBusy = true;
     try {
       const res = await fetch("/api/soundboard-queue", { cache: "no-store" });
@@ -761,10 +926,12 @@ function startSoundboardQueue() {
       const events = Array.isArray(data?.events) ? data.events : [];
       events.forEach((event) => {
         if (event?.type === "play" && Number.isFinite(event.slotIndex)) {
-          playSoundLocal(event.slotIndex);
+          const catIndex = Number.isFinite(event.categoryIndex) ? event.categoryIndex : state.activeCategory;
+          playSoundLocal(event.slotIndex, catIndex);
         } else if (event?.type === "stop") {
           if (Number.isFinite(event.slotIndex)) {
-            stopSoundLocal(event.slotIndex);
+            const catIndex = Number.isFinite(event.categoryIndex) ? event.categoryIndex : state.activeCategory;
+            stopSoundLocal(event.slotIndex, catIndex);
           } else {
             stopAllSounds();
           }
@@ -782,10 +949,13 @@ async function pullStateFromServer() {
   const res = await fetch("/api/state", { cache: "no-store" });
   const data = await res.json();
   if (!data?.state?.categories?.length) return;
-  if ((data.state.updatedAt || 0) <= (state.updatedAt || 0)) return;
+  const incomingUpdated = data.state.updatedAt || 0;
+  const incomingVolume = data.state.volumeUpdatedAt || 0;
+  if (incomingUpdated <= (state.updatedAt || 0) && incomingVolume <= (state.volumeUpdatedAt || 0)) return;
   state = data.state;
   localStorage.setItem(stateKey, JSON.stringify(state));
   render();
+  applySinkVolumesFromState();
   setSyncStatus("Synced", true);
 }
 
@@ -820,18 +990,21 @@ function adjustSlotVolume(slotIndex, delta) {
   const next = clampPercent((slot.volume ?? 100) + delta);
   slot.volume = next;
   setSlotPlaybackVolume(slotIndex, next);
+  const node = grid?.querySelector(`.slot[data-index="${slotIndex}"] .slot-vol-value`);
+  if (node) node.textContent = `${next}%`;
   saveState();
-  renderGrid();
 }
 
 function setSlotFromFile(file, slotIndex, name) {
   const reader = new FileReader();
   reader.onload = () => {
     const cat = state.categories[state.activeCategory];
+    const bind = soundBindInput?.value?.trim() || "";
     cat.slots[slotIndex] = {
       name,
       audioData: reader.result,
       volume: 100,
+      bind,
     };
     saveState();
     render();
@@ -852,7 +1025,7 @@ function populateCategorySelect(currentIndex) {
   soundCategoryRow.classList.remove("hidden");
 }
 
-function moveSoundToCategory(fromIndex, toCategoryIndex, name) {
+function moveSoundToCategory(fromIndex, toCategoryIndex, name, bind) {
   const sourceCat = state.categories[state.activeCategory];
   const targetCat = state.categories[toCategoryIndex];
   if (!sourceCat || !targetCat) return;
@@ -863,7 +1036,7 @@ function moveSoundToCategory(fromIndex, toCategoryIndex, name) {
     targetCat.slots.push(emptySlot());
     targetIndex = targetCat.slots.length - 1;
   }
-  targetCat.slots[targetIndex] = { ...slot, name };
+  targetCat.slots[targetIndex] = { ...slot, name, bind: bind ?? slot.bind };
   sourceCat.slots[fromIndex] = emptySlot();
   compactCategory(state.activeCategory);
   state.activeCategory = toCategoryIndex;
@@ -873,11 +1046,13 @@ function openSoundMeta(file, slotIndex) {
   pendingSoundEdit = false;
   pendingSoundFile = file;
   pendingSoundIndex = slotIndex;
+  if (soundMetaDelete) soundMetaDelete.classList.add("hidden");
   if (soundMetaTitle) soundMetaTitle.textContent = "Add Sound";
   if (soundNameInput) {
     soundNameInput.value = file.name.replace(/\.[^/.]+$/, "");
     soundNameInput.focus();
   }
+  if (soundBindInput) soundBindInput.value = "";
   if (soundCategoryRow) soundCategoryRow.classList.add("hidden");
   if (soundMeta) soundMeta.classList.remove("hidden");
 }
@@ -888,11 +1063,13 @@ function openSoundEdit(slotIndex) {
   pendingSoundEdit = true;
   pendingSoundFile = null;
   pendingSoundIndex = slotIndex;
+  if (soundMetaDelete) soundMetaDelete.classList.remove("hidden");
   if (soundMetaTitle) soundMetaTitle.textContent = "Edit Sound";
   if (soundNameInput) {
     soundNameInput.value = slot.name || "";
     soundNameInput.focus();
   }
+  if (soundBindInput) soundBindInput.value = slot.bind || "";
   populateCategorySelect(state.activeCategory);
   if (soundMeta) soundMeta.classList.remove("hidden");
 }
@@ -902,7 +1079,9 @@ function closeSoundMeta() {
   pendingSoundFile = null;
   pendingSoundIndex = null;
   pendingSoundEdit = false;
+  if (soundMetaDelete) soundMetaDelete.classList.add("hidden");
   if (soundNameInput) soundNameInput.value = "";
+  if (soundBindInput) soundBindInput.value = "";
   if (soundCategoryRow) soundCategoryRow.classList.add("hidden");
 }
 
@@ -933,6 +1112,7 @@ if (soundMetaSave) {
   soundMetaSave.addEventListener("click", () => {
     if (pendingSoundIndex === null) return;
     const name = soundNameInput?.value?.trim();
+    const bind = soundBindInput?.value?.trim() || "";
     if (!name) {
       alert("Please enter a name.");
       return;
@@ -942,9 +1122,10 @@ if (soundMetaSave) {
       if (!slot?.audioData) return;
       const targetCatIndex = soundCategorySelect ? Number(soundCategorySelect.value) : state.activeCategory;
       if (Number.isFinite(targetCatIndex) && targetCatIndex !== state.activeCategory) {
-        moveSoundToCategory(pendingSoundIndex, targetCatIndex, name);
+        moveSoundToCategory(pendingSoundIndex, targetCatIndex, name, bind);
       } else {
         slot.name = name;
+        slot.bind = bind;
       }
       saveState();
       render();
@@ -953,6 +1134,27 @@ if (soundMetaSave) {
       setSlotFromFile(pendingSoundFile, pendingSoundIndex, name);
     }
     closeSoundMeta();
+  });
+}
+
+if (soundMetaDelete) {
+  soundMetaDelete.addEventListener("click", () => {
+    if (!Number.isFinite(pendingSoundIndex)) return;
+    deleteSlot(pendingSoundIndex);
+    closeSoundMeta();
+  });
+}
+
+if (soundBindInput) {
+  soundBindInput.addEventListener("keydown", (event) => {
+    if (event.key === "Tab") return;
+    event.preventDefault();
+    if (event.key === "Backspace" || event.key === "Delete") {
+      soundBindInput.value = "";
+      return;
+    }
+    const bind = formatBindFromEvent(event);
+    if (bind) soundBindInput.value = bind;
   });
 }
 
@@ -1175,6 +1377,10 @@ async function refreshRouting() {
       name.textContent = input.display + (input.state ? ` (${input.state})` : "");
       const select = document.createElement("select");
       select.className = "routing-select";
+      const autoOpt = document.createElement("option");
+      autoOpt.value = "__auto__";
+      autoOpt.textContent = "Auto";
+      select.appendChild(autoOpt);
       sinks.forEach((sink) => {
         const opt = document.createElement("option");
         opt.value = sink.name;
@@ -1182,7 +1388,34 @@ async function refreshRouting() {
         if (sink.name === input.sink) opt.selected = true;
         select.appendChild(opt);
       });
+      const override = state.routingOverrides?.[input.key];
+      if (override && override !== input.sink) {
+        select.value = override;
+        if (audioAvailable) {
+          const last = routingEnforceAt.get(input.key) || 0;
+          const now = Date.now();
+          if (now - last > 1500) {
+            routingEnforceAt.set(input.key, now);
+            routingList.dataset.pauseUntil = String(Date.now() + 1500);
+            fetch("/api/move-sink-input", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ ids: input.ids || [input.id], sink: override }),
+            }).catch(() => {});
+          }
+        }
+      } else if (override && override === input.sink) {
+        select.value = override;
+      }
       select.addEventListener("change", async () => {
+        if (!state.routingOverrides) state.routingOverrides = {};
+        if (select.value === "__auto__") {
+          delete state.routingOverrides[input.key];
+          saveState();
+          return;
+        }
+        state.routingOverrides[input.key] = select.value;
+        saveState();
         routingList.dataset.pauseUntil = String(Date.now() + 1500);
         try {
           await fetch("/api/move-sink-input", {
@@ -1289,6 +1522,29 @@ function normalizeDeviceLabel(raw) {
   return label;
 }
 
+function normalizeBindKey(key) {
+  if (key === " " || key === "Spacebar") return "Space";
+  if (key === "ArrowUp") return "Up";
+  if (key === "ArrowDown") return "Down";
+  if (key === "ArrowLeft") return "Left";
+  if (key === "ArrowRight") return "Right";
+  if (key.length === 1) return key.toUpperCase();
+  return key;
+}
+
+function formatBindFromEvent(event) {
+  const rawKey = event.key;
+  if (!rawKey || rawKey === "Unidentified" || rawKey === "Dead") return "";
+  if (["Control", "Shift", "Alt", "Meta"].includes(rawKey)) return "";
+  const mods = [];
+  if (event.ctrlKey) mods.push("Ctrl");
+  if (event.altKey) mods.push("Alt");
+  if (event.shiftKey) mods.push("Shift");
+  if (event.metaKey) mods.push("Meta");
+  const key = normalizeBindKey(rawKey);
+  return [...mods, key].join("+");
+}
+
 function renderStreamModes() {
   if (!streamToggle) return;
   streamToggle.classList.toggle("active", state.streamMode);
@@ -1358,6 +1614,25 @@ function isTypingTarget(target) {
   if (tag === "INPUT" || tag === "TEXTAREA") return true;
   return target.isContentEditable === true;
 }
+
+function playSoundByBind(bind) {
+  if (!bind) return false;
+  const cat = state.categories[state.activeCategory];
+  if (!cat?.slots?.length) return false;
+  const idx = cat.slots.findIndex((slot) => slot?.bind === bind);
+  if (idx < 0) return false;
+  playSound(idx);
+  return true;
+}
+
+document.addEventListener("keydown", (event) => {
+  if (event.repeat) return;
+  if (isTypingTarget(event.target)) return;
+  const bind = formatBindFromEvent(event);
+  if (!bind) return;
+  const handled = playSoundByBind(bind);
+  if (handled) event.preventDefault();
+});
 
 if (inputSelect) {
   inputSelect.addEventListener("change", async () => {
@@ -1460,13 +1735,18 @@ if (systemInput) {
   });
 }
 
-if (pinToggle) {
-  pinToggle.addEventListener("click", () => {
-    if (!pinValue) return;
+if (pinValue) {
+  pinValue.addEventListener("click", () => {
     const pin = pinValue.dataset.pin || "";
     const showing = pinValue.textContent === pin;
-    pinValue.textContent = showing ? "••••" : pin || "••••";
-    pinToggle.textContent = showing ? "Show" : "Hide";
+    pinRevealLocked = !showing;
+    pinValue.textContent = pinRevealLocked ? pin || "••••" : "••••";
+  });
+  pinValue.addEventListener("mouseenter", () => {
+    showPinValue();
+  });
+  pinValue.addEventListener("mouseleave", () => {
+    hidePinValue();
   });
 }
 
@@ -1892,22 +2172,30 @@ async function applyAudioFxNow() {
   }
 }
 
-function playSoundLocal(slotIndex) {
-  const slot = state.categories[state.activeCategory].slots[slotIndex];
+function playSoundLocal(slotIndex, categoryIndex = state.activeCategory) {
+  const category = state.categories[categoryIndex];
+  const slot = category?.slots?.[slotIndex];
   if (!slot?.audioData) return;
   const audio = new Audio(slot.audioData);
-  audio.volume = clampPercent(slot.volume ?? 100) / 100;
-  const sinkId = state.soundboardSinkId || state.outputDeviceId;
+  const slotVolume = clampPercent(slot.volume ?? 100) / 100;
+  const masterValue = clampPercent(state.sinkVolumes?.soundboard ?? getSoundboardVolume()) / 100;
+  const masterVolume = state.mutedSinks?.soundboard ? 0 : masterValue;
+  audio._slotVolume = slotVolume;
+  audio.volume = slotVolume * masterVolume;
+  const sinkId = state.soundboardSinkId || "soundboard" || state.outputDeviceId;
   if (sinkId && typeof audio.setSinkId === "function") {
     audio.setSinkId(sinkId).catch(() => {});
   }
+  attachSoundboardMeter(audio);
   audio.play();
-  const list = activeAudio.get(slotIndex) || [];
+  scheduleSoundboardRoute();
+  const audioKey = `${categoryIndex}:${slotIndex}`;
+  const list = activeAudio.get(audioKey) || [];
   list.push(audio);
-  activeAudio.set(slotIndex, list);
+  activeAudio.set(audioKey, list);
   audio.addEventListener("ended", () => {
-    const updated = (activeAudio.get(slotIndex) || []).filter((a) => a !== audio);
-    activeAudio.set(slotIndex, updated);
+    const updated = (activeAudio.get(audioKey) || []).filter((a) => a !== audio);
+    activeAudio.set(audioKey, updated);
   });
 }
 
@@ -1919,34 +2207,66 @@ async function playSound(slotIndex) {
       await fetch("/api/soundboard-play", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ slotIndex }),
+        body: JSON.stringify({ slotIndex, categoryIndex: state.activeCategory }),
       });
     } catch {
       // ignore
     }
     return;
   }
-  playSoundLocal(slotIndex);
+  playSoundLocal(slotIndex, state.activeCategory);
 }
 
-function stopSoundLocal(slotIndex) {
-  const list = activeAudio.get(slotIndex) || [];
+function stopSoundLocal(slotIndex, categoryIndex = state.activeCategory) {
+  const audioKey = `${categoryIndex}:${slotIndex}`;
+  const list = activeAudio.get(audioKey) || [];
   list.forEach((audio) => {
     audio.pause();
     audio.currentTime = 0;
   });
-  activeAudio.set(slotIndex, []);
+  activeAudio.set(audioKey, []);
 }
 
 function stopAllSounds() {
   const keys = Array.from(activeAudio.keys());
-  keys.forEach((slotIndex) => stopSoundLocal(slotIndex));
+  keys.forEach((key) => {
+    const parts = String(key).split(":");
+    if (parts.length === 2) {
+      stopSoundLocal(Number(parts[1]), Number(parts[0]));
+    } else {
+      stopSoundLocal(Number(key), state.activeCategory);
+    }
+  });
 }
 
 function clampPercent(value) {
   const num = Number(value);
   if (Number.isNaN(num)) return 100;
   return Math.max(0, Math.min(100, num));
+}
+
+function percentToDb(value) {
+  const percent = clampPercent(value);
+  if (percent <= 0) return -60;
+  const db = -60 + (percent / 100) * 60;
+  return Math.round(db);
+}
+
+function ensureDbMeter(labelEl) {
+  if (!labelEl) return null;
+  if (isElectron) return labelEl;
+  if (labelEl.querySelector(".db-meter")) return labelEl;
+  labelEl.innerHTML = "";
+  const text = document.createElement("div");
+  text.className = "db-text";
+  const meter = document.createElement("div");
+  meter.className = "db-meter";
+  const fill = document.createElement("div");
+  fill.className = "db-meter-fill";
+  meter.appendChild(fill);
+  labelEl.appendChild(text);
+  labelEl.appendChild(meter);
+  return labelEl;
 }
 
 function getSoundboardVolume() {
@@ -1957,20 +2277,34 @@ function getSoundboardVolume() {
 
 function setActiveSoundboardVolume(value) {
   const volume = clampPercent(value) / 100;
+  const masterVolume = state.mutedSinks?.soundboard ? 0 : volume;
   activeAudio.forEach((list) => {
     list.forEach((audio) => {
-      audio.volume = volume;
+      const slotVolume = Number.isFinite(audio._slotVolume) ? audio._slotVolume : 1;
+      audio.volume = slotVolume * masterVolume;
     });
   });
   if (soundboardMaster) soundboardMaster.value = String(clampPercent(value));
-  if (soundboardMasterValue) soundboardMasterValue.textContent = `${clampPercent(value)}%`;
+  if (soundboardMasterValue) {
+    const percent = clampPercent(value);
+    if (isElectron) {
+      soundboardMasterValue.textContent = `${percent}%`;
+    } else {
+      const db = percentToDb(percent);
+      soundboardMasterValue.textContent = `${percent}% (${db} dB)`;
+    }
+  }
 }
 
-function setSlotPlaybackVolume(slotIndex, value) {
-  const volume = clampPercent(value) / 100;
-  const list = activeAudio.get(slotIndex) || [];
+function setSlotPlaybackVolume(slotIndex, value, categoryIndex = state.activeCategory) {
+  const slotVolume = clampPercent(value) / 100;
+  const masterValue = clampPercent(state.sinkVolumes?.soundboard ?? getSoundboardVolume()) / 100;
+  const masterVolume = state.mutedSinks?.soundboard ? 0 : masterValue;
+  const audioKey = `${categoryIndex}:${slotIndex}`;
+  const list = activeAudio.get(audioKey) || [];
   list.forEach((audio) => {
-    audio.volume = volume;
+    audio._slotVolume = slotVolume;
+    audio.volume = slotVolume * masterVolume;
   });
 }
 
@@ -1991,6 +2325,74 @@ async function stopSound(slotIndex) {
 }
 
 const liveLevels = new Map();
+let soundboardMeterCtx = null;
+const soundboardMeterNodes = new Map();
+
+function getSoundboardMeterCtx() {
+  if (soundboardMeterCtx) return soundboardMeterCtx;
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return null;
+  soundboardMeterCtx = new Ctx();
+  if (soundboardMeterCtx.state === "suspended") {
+    soundboardMeterCtx.resume().catch(() => {});
+  }
+  return soundboardMeterCtx;
+}
+
+function attachSoundboardMeter(audio) {
+  if (!audio || soundboardMeterNodes.has(audio)) return;
+  const ctx = getSoundboardMeterCtx();
+  if (!ctx) return;
+  try {
+    const source = ctx.createMediaElementSource(audio);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 1024;
+    source.connect(analyser);
+    analyser.connect(ctx.destination);
+    const data = new Float32Array(analyser.fftSize);
+    soundboardMeterNodes.set(audio, { source, analyser, data });
+    audio.addEventListener(
+      "ended",
+      () => {
+        const nodes = soundboardMeterNodes.get(audio);
+        if (nodes) {
+          try {
+            nodes.source.disconnect();
+            nodes.analyser.disconnect();
+          } catch {
+            // ignore
+          }
+        }
+        soundboardMeterNodes.delete(audio);
+      },
+      { once: true }
+    );
+  } catch {
+    // ignore
+  }
+}
+
+function getSoundboardLocalLevel() {
+  if (!soundboardMeterNodes.size) return null;
+  let peakDb = -80;
+  soundboardMeterNodes.forEach((nodes) => {
+    const { analyser, data } = nodes;
+    analyser.getFloatTimeDomainData(data);
+    let sumSquares = 0;
+    for (let i = 0; i < data.length; i += 1) {
+      const sample = data[i];
+      sumSquares += sample * sample;
+    }
+    const rms = Math.sqrt(sumSquares / data.length);
+    const db = rms <= 0 ? -80 : 20 * Math.log10(rms);
+    if (db > peakDb) peakDb = db;
+  });
+  const clampedDb = Math.max(-80, Math.min(0, peakDb));
+  const level = Math.max(0, Math.min(1, (clampedDb + 80) / 80));
+  const masterValue = clampPercent(state.sinkVolumes?.soundboard ?? getSoundboardVolume()) / 100;
+  const masterVolume = state.mutedSinks?.soundboard ? 0 : masterValue;
+  return { level: level * masterVolume, db: Math.round(clampedDb) };
+}
 
 function updateMeterVisibility() {
   // meters removed
@@ -2014,14 +2416,247 @@ function getSinkForSource(source) {
   }
 }
 
-function startMeterLoop() {}
+function startMeterLoop() {
+  const meters = new Map();
+  const meterEls = Array.from(document.querySelectorAll(".peak-meter[data-meter]"));
+  meterEls.forEach((meter) => {
+    const key = meter.dataset.meter || "";
+    const fill = meter.querySelector(".peak-meter-fill");
+    if (!key || !fill) return;
+    let peak = meter.querySelector(".peak-meter-peak");
+    if (!peak) {
+      peak = document.createElement("div");
+      peak.className = "peak-meter-peak";
+      meter.appendChild(peak);
+    }
+    fill.style.transition = "none";
+    const list = meters.get(key) || [];
+    list.push({ meter, fill, peak });
+    meters.set(key, list);
+  });
+  if (!meters.size) return;
+  const targets = new Map();
+  const targetDbByKey = new Map();
+  const displays = new Map();
+  const peakDbByKey = new Map();
+  const peakAtByKey = new Map();
+  const lastDbByKey = new Map();
+  const volumeScaleByKey = new Map();
+  let lastFrame = performance.now();
+
+  const updatePeak = (currentDb, now, peakDb, peakAt) => {
+    let db = currentDb;
+    if (!Number.isFinite(db)) db = -60;
+    if (db > peakDb) {
+      peakDb = db;
+      peakAt = now;
+    }
+    return { peakDb, peakAt };
+  };
+
+  const clampDb = (db) => {
+    if (!Number.isFinite(db)) return -60;
+    return Math.max(-60, Math.min(0, db));
+  };
+
+  const dbToLevel = (db) => {
+    const clamped = clampDb(db);
+    return (clamped + 60) / 60;
+  };
+
+  const animate = () => {
+    const now = performance.now();
+    const dt = Math.max(0.001, Math.min(0.05, (now - lastFrame) / 1000));
+    lastFrame = now;
+    meters.forEach((entries, key) => {
+      if (!entries.length) return;
+      const target = targets.get(key) ?? 0;
+      const current = displays.get(key) ?? 0;
+      const volumeScale = volumeScaleByKey.get(key) ?? 1;
+      const rise = target > current;
+      const jump = target - current;
+      const snap = rise && jump > 0.12;
+      const attackTime = 0.012;
+      const stopSnap = target <= 0.002;
+      const releaseTime = 0.08;
+      const riseCoef = 1 - Math.exp(-dt / attackTime);
+      const fallCoef = 1 - Math.exp(-dt / releaseTime);
+      const next = snap
+        ? target
+        : rise
+        ? current + (target - current) * riseCoef
+        : stopSnap
+        ? target
+        : current + (target - current) * fallCoef;
+      const display = Math.max(0, Math.min(1, next)) * volumeScale;
+      displays.set(key, display);
+      entries.forEach((entry) => {
+        entry.fill.style.width = `${Math.round(display * 100)}%`;
+      });
+      const prevPeakDb = peakDbByKey.get(key) ?? -60;
+      const prevPeakAt = peakAtByKey.get(key) ?? 0;
+      const currentDb = targetDbByKey.get(key) ?? -60;
+      const peakRes = updatePeak(currentDb, now, prevPeakDb, prevPeakAt);
+      peakDbByKey.set(key, peakRes.peakDb);
+      peakAtByKey.set(key, peakRes.peakAt);
+      const peakLevel = Math.max(0, Math.min(1, dbToLevel(peakRes.peakDb))) * volumeScale;
+      entries.forEach((entry) => {
+        if (entry.peak) entry.peak.style.left = `${Math.round(peakLevel * 100)}%`;
+      });
+    });
+    requestAnimationFrame(animate);
+  };
+  requestAnimationFrame(animate);
+  const source = new EventSource("/api/levels");
+  source.onmessage = (event) => {
+    let payload = null;
+    try {
+      payload = JSON.parse(event.data);
+    } catch {
+      return;
+    }
+    if (!payload || typeof payload !== "object") return;
+    const updateDbLabel = (key, dbValue, peakValue) => {
+      const percent = clampPercent(state.sinkVolumes?.[key] ?? 100);
+      setSinkLabel(key, percent, dbValue, peakValue);
+      if (key === "soundboard" && soundboardMasterValue) {
+        const current = Math.round(dbValue);
+        const peak = Math.round(peakValue);
+        soundboardMasterValue.textContent = `${percent}% (${current} dB | ${peak} dB)`;
+      }
+    };
+    const localSoundboard = getSoundboardLocalLevel();
+    if (localSoundboard) {
+      payload = { ...payload, soundboard: { ...localSoundboard } };
+    }
+    if (state.streamLinks && Object.values(state.streamLinks).some(Boolean)) {
+      const linked = Object.entries(state.streamLinks)
+        .filter(([, enabled]) => Boolean(enabled))
+        .map(([key]) => key)
+        .filter((key) => key !== "stream");
+      if (linked.length) {
+        let maxLevel = 0;
+        linked.forEach((key) => {
+          const level = Math.max(0, Math.min(1, Number(payload?.[key]?.level || 0)));
+          if (level > maxLevel) maxLevel = level;
+        });
+        const db = maxLevel <= 0 ? -60 : 20 * Math.log10(maxLevel);
+        payload = { ...payload, stream: { level: maxLevel, db: Math.round(db) } };
+      }
+    }
+    Object.entries(payload).forEach(([key, value]) => {
+      const entries = meters.get(key) || [];
+      if (!entries.length) return;
+      const rawLevel = Math.max(0, Math.min(1, Number(value?.level || 0)));
+      const rawDb =
+        Number.isFinite(value?.db) ? Number(value.db) : Math.round(rawLevel * 80 - 80);
+      let clampedDb = clampDb(rawDb);
+      const prevDb = lastDbByKey.get(key);
+      const wasSilent = Number.isFinite(prevDb) ? prevDb <= -59.5 : false;
+      const nowActive = clampedDb > -59.5;
+      const volumeScale = clampPercent(state.sinkVolumes?.[key] ?? 100) / 100;
+      volumeScaleByKey.set(key, volumeScale);
+      if (key === "mic") {
+        if (Boolean(state.mutedSinks?.mic)) {
+          clampedDb = -60;
+          targets.set(key, 0);
+          targetDbByKey.set(key, clampedDb);
+          peakDbByKey.set(key, clampedDb);
+          peakAtByKey.set(key, 0);
+          updateDbLabel(key, clampedDb, clampedDb);
+          lastDbByKey.set(key, clampedDb);
+          return;
+        }
+        if (state.audioSettings?.gateEnabled) {
+          const gateDb = -60 + (Number(state.audioSettings.gateThreshold ?? 45) / 100) * 60;
+          if (clampedDb < gateDb) {
+            clampedDb = -60;
+            targets.set(key, 0);
+            targetDbByKey.set(key, clampedDb);
+            peakDbByKey.set(key, clampedDb);
+            peakAtByKey.set(key, 0);
+            updateDbLabel(key, clampedDb, clampedDb);
+            lastDbByKey.set(key, clampedDb);
+            return;
+          }
+        }
+        targets.set(key, dbToLevel(clampedDb));
+        targetDbByKey.set(key, clampedDb);
+        let peakValue = peakDbByKey.get(key) ?? clampedDb;
+        if (wasSilent && nowActive) {
+          peakValue = clampedDb;
+          peakDbByKey.set(key, clampedDb);
+          peakAtByKey.set(key, performance.now());
+        }
+        updateDbLabel(key, clampedDb, peakValue);
+        lastDbByKey.set(key, clampedDb);
+        return;
+      }
+      if (key === "soundboard" && Boolean(state.mutedSinks?.soundboard)) {
+        clampedDb = -60;
+        targets.set(key, 0);
+        targetDbByKey.set(key, clampedDb);
+        peakDbByKey.set(key, clampedDb);
+        peakAtByKey.set(key, 0);
+        updateDbLabel(key, clampedDb, clampedDb);
+        lastDbByKey.set(key, clampedDb);
+        return;
+      }
+      targets.set(key, dbToLevel(clampedDb));
+      targetDbByKey.set(key, clampedDb);
+      let peakValue = peakDbByKey.get(key) ?? clampedDb;
+      if (wasSilent && nowActive) {
+        peakValue = clampedDb;
+        peakDbByKey.set(key, clampedDb);
+        peakAtByKey.set(key, performance.now());
+      }
+      updateDbLabel(key, clampedDb, peakValue);
+      lastDbByKey.set(key, clampedDb);
+    });
+  };
+  source.onerror = () => {
+    // Let EventSource retry automatically.
+  };
+}
+
+function applySinkVolumesFromState() {
+  const ranges = Array.from(document.querySelectorAll(".rocker-range"));
+  ranges.forEach((range) => {
+    const channel = range.dataset.channel || "";
+    if (!channel) return;
+    const value = Number(state.sinkVolumes?.[channel]);
+    if (!Number.isFinite(value)) return;
+    range.value = String(value);
+    setSinkLabel(channel, value);
+    if (channel === "soundboard") {
+      const muted = Boolean(state.mutedSinks?.soundboard);
+      setActiveSoundboardVolume(muted ? 0 : value);
+    }
+  });
+  if (soundboardMasterValue) {
+    const percent = clampPercent(state.sinkVolumes?.soundboard ?? getSoundboardVolume());
+    if (isElectron) {
+      soundboardMasterValue.textContent = `${percent}%`;
+    } else {
+      const db = percentToDb(percent);
+      soundboardMasterValue.textContent = `${percent}% (${db} dB)`;
+    }
+  }
+}
 
 function initVolumeRockers() {
   const ranges = Array.from(document.querySelectorAll(".rocker-range"));
   const map = new Map();
+  let volumeInitDirty = false;
   ranges.forEach((range) => {
     const channel = range.dataset.channel || "";
-    map.set(channel, range);
+    if (!map.has(channel)) map.set(channel, []);
+    map.get(channel).push(range);
+    const initial = Number(range.value || 0);
+    if (!Number.isFinite(state.sinkVolumes?.[channel])) {
+      state.sinkVolumes[channel] = initial;
+      volumeInitDirty = true;
+    }
   });
   const sinkMap = {
     browser: "browser",
@@ -2066,15 +2701,14 @@ function initVolumeRockers() {
   };
 
   const setVolume = (channel, value) => {
-    const range = map.get(channel);
-    if (!range) return;
-    range.value = String(value);
+    const list = map.get(channel) || [];
+    list.forEach((range) => {
+      range.value = String(value);
+    });
   };
 
   const updatePercent = (baseChannel, value) => {
-    const percentLabel = document.querySelector(`.sink-percent[data-percent="${baseChannel}"]`);
-    if (!percentLabel) return;
-    percentLabel.textContent = `Volume ${value}%`;
+    setSinkLabel(baseChannel, value);
   };
 
   const syncPair = (channel, value) => {
@@ -2083,15 +2717,26 @@ function initVolumeRockers() {
     const sink = sinkMap[channel];
     if (sink) pushSinkVolume(sink, value);
     if (channel === "soundboard") {
-      setActiveSoundboardVolume(value);
+      const next = state.mutedSinks?.soundboard ? 0 : value;
+      setActiveSoundboardVolume(next);
+    }
+    const nextValue = Number(value);
+    if (Number.isFinite(nextValue) && state.sinkVolumes?.[channel] !== nextValue) {
+      state.sinkVolumes[channel] = nextValue;
+      saveState({ touchUpdatedAt: false, touchVolume: true });
     }
   };
 
   ranges.forEach((range) => {
     const channel = range.dataset.channel || "";
     if (!channel) return;
-    const initial = Number(range.value || 0);
-    syncPair(channel, initial);
+    const initial = Number(state.sinkVolumes?.[channel]);
+    if (Number.isFinite(initial)) {
+      syncPair(channel, initial);
+    } else {
+      const fallback = Number(range.value || 0);
+      syncPair(channel, fallback);
+    }
 
     range.addEventListener("input", () => {
       syncPair(channel, range.value);
@@ -2117,6 +2762,17 @@ function initVolumeRockers() {
       if (event.pointerType === "touch") handleDoubleTap();
     });
   });
+
+  if (soundboardMaster) {
+    soundboardMaster.addEventListener("input", () => {
+      const value = clampPercent(soundboardMaster.value);
+      syncPair("soundboard", value);
+    });
+  }
+
+  if (volumeInitDirty) {
+    saveState({ touchUpdatedAt: false, touchVolume: true });
+  }
 }
 
 function initSinkControls() {
@@ -2129,6 +2785,10 @@ function initSinkControls() {
       state.mutedSinks[sink] = muted;
       renderSinkControls();
       saveState();
+      if (sink === "soundboard") {
+        const masterValue = clampPercent(state.sinkVolumes?.soundboard ?? getSoundboardVolume());
+        setActiveSoundboardVolume(muted ? 0 : masterValue);
+      }
       if (!serverAvailable) return;
       try {
         await fetch("/api/sink-mute", {
@@ -2222,15 +2882,8 @@ initServerSync().then(() => {
   render();
   initVolumeRockers();
   startMeterLoop();
+  startAudioStatusPoll();
   initSinkControls();
-  if (soundboardMaster) {
-    soundboardMaster.value = "100";
-    if (soundboardMasterValue) soundboardMasterValue.textContent = "100%";
-    soundboardMaster.addEventListener("input", () => {
-      const value = clampPercent(soundboardMaster.value);
-      setActiveSoundboardVolume(value);
-    });
-  }
   pushAudioSettingsToServer();
   refreshRouting();
   refreshSystemOutputs();

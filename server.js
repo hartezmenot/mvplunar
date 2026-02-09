@@ -10,10 +10,13 @@ const pipewireConfigDir = path.join(process.env.HOME || root, ".config/pipewire/
 const pipewirePulseConfigDir = path.join(process.env.HOME || root, ".config/pipewire/pipewire-pulse.conf.d");
 const pipewireConfigFile = path.join(pipewireConfigDir, "99-mvp-lunar-mic.conf");
 const streamOutputConfigFile = path.join(pipewirePulseConfigDir, "95-mvp-stream-output.conf");
+const micSinkConfigFile = path.join(pipewirePulseConfigDir, "90-mvp-lunar-mic.conf");
+const micSourceConfigFile = path.join(pipewirePulseConfigDir, "89-mvp-lunar-mic-source.conf");
 const sourceCacheFile = path.join(dataDir, "default-source.txt");
 const loopbackConfigFile = path.join(pipewirePulseConfigDir, "91-mvp-lunar-loopbacks.conf");
 const loopbackStateFile = path.join(dataDir, "loopbacks.json");
 const micLoopbackFile = path.join(dataDir, "mic-loopback.txt");
+const micSinkFile = path.join(dataDir, "mic-sink.txt");
 const streamLinksFile = path.join(dataDir, "stream-links.json");
 const soundboardMicFile = path.join(dataDir, "soundboard-mic.txt");
 const chatMicFile = path.join(dataDir, "chat-mic.txt");
@@ -29,6 +32,11 @@ const serverConfig = readServerConfig();
 // Always rotate PIN on server start (app restart/reboot).
 refreshPin();
 
+const PACTL_COOLDOWN_MS = 5000;
+const PIPEWIRE_RESTART_COOLDOWN_MS = 15000;
+const pactlState = { disabledUntil: 0, lastError: "", lastErrorAt: 0 };
+let lastPipewireRestartAt = 0;
+
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
 }
@@ -39,10 +47,11 @@ if (!fs.existsSync(pipewirePulseConfigDir)) {
   fs.mkdirSync(pipewirePulseConfigDir, { recursive: true });
 }
 
-function enqueueSoundboardEvent(type, slotIndex) {
+function enqueueSoundboardEvent(type, slotIndex, categoryIndex) {
   const event = {
     type,
     slotIndex: Number.isFinite(slotIndex) ? slotIndex : null,
+    categoryIndex: Number.isFinite(categoryIndex) ? categoryIndex : null,
     ts: Date.now(),
   };
   soundboardQueue.push(event);
@@ -238,8 +247,39 @@ function writeChatFilterConfig({ rnnEnabled, gateEnabled, gateThreshold, noiseSu
   fs.writeFileSync(path.join(pipewireConfigDir, "98-mvp-lunar-chat.conf"), config);
 }
 
+function isPactlCmd(cmd) {
+  return cmd.endsWith("/pactl") || cmd === "pactl";
+}
+
+function canUsePactl() {
+  return Date.now() >= pactlState.disabledUntil;
+}
+
+function markPactlFailure(err) {
+  const msg = String(err || "pactl failed").trim();
+  const now = Date.now();
+  const logGapMs = 30000;
+  if (now - pactlState.lastErrorAt > logGapMs || msg !== pactlState.lastError) {
+    console.error(`[pactl] ${msg}`);
+    pactlState.lastError = msg;
+    pactlState.lastErrorAt = now;
+  }
+  pactlState.disabledUntil = Math.max(pactlState.disabledUntil, now + PACTL_COOLDOWN_MS);
+}
+
 function runCmd(cmd, args) {
   return new Promise((resolve) => {
+    if (isPactlCmd(cmd) && !canUsePactl()) return resolve();
+    if (isPactlCmd(cmd)) {
+      const proc = spawn(cmd, args, { stdio: ["ignore", "ignore", "pipe"] });
+      let err = "";
+      if (proc.stderr) proc.stderr.on("data", (chunk) => (err += chunk.toString()));
+      proc.on("exit", (code) => {
+        if (code !== 0) markPactlFailure(err || `exit ${code}`);
+        resolve();
+      });
+      return;
+    }
     const proc = spawn(cmd, args, { stdio: "ignore" });
     proc.on("exit", () => resolve());
   });
@@ -247,11 +287,27 @@ function runCmd(cmd, args) {
 
 function runCmdOutput(cmd, args) {
   return new Promise((resolve) => {
+    if (isPactlCmd(cmd) && !canUsePactl()) return resolve("");
     const proc = spawn(cmd, args);
     let out = "";
+    let err = "";
     proc.stdout.on("data", (chunk) => (out += chunk.toString()));
-    proc.on("exit", () => resolve(out.trim()));
+    if (proc.stderr) proc.stderr.on("data", (chunk) => (err += chunk.toString()));
+    proc.on("exit", (code) => {
+      if (isPactlCmd(cmd) && code !== 0) {
+        markPactlFailure(err || `exit ${code}`);
+        return resolve("");
+      }
+      resolve(out.trim());
+    });
   });
+}
+
+async function safeRestartPipewire(units) {
+  const now = Date.now();
+  if (now - lastPipewireRestartAt < PIPEWIRE_RESTART_COOLDOWN_MS) return;
+  lastPipewireRestartAt = now;
+  await runCmd("/usr/bin/systemctl", ["--user", "restart", ...units]);
 }
 
 function normalizeDeviceLabel(label) {
@@ -384,6 +440,7 @@ async function applyLoopbacks(state, options = {}) {
     .map((line) => line.trim())
     .filter((line) => line && line.includes("module-loopback") && line.includes("source="))
     .forEach((line) => {
+      if (line.includes("sink=mic")) return;
       const id = line.split("\t")[0];
       const match = line.match(/source=([^\\s]+)/);
       const source = match ? match[1] : "";
@@ -396,15 +453,20 @@ async function applyLoopbacks(state, options = {}) {
     await runCmd("/usr/bin/pactl", ["unload-module", id]);
   }
   const filtered = Object.fromEntries(
-    Object.entries(state).filter(([source]) => sources.has(source))
+    Object.entries(state).filter(([source]) => sources.has(source) || source.endsWith(".monitor") || source === "chat_fx_output")
   );
   writeLoopbacks(filtered);
   if (writeConfig) writeLoopbackConfig(filtered);
   if (restart) {
-    await runCmd("/usr/bin/systemctl", ["--user", "restart", "pipewire-pulse"]);
+    await safeRestartPipewire(["pipewire-pulse"]);
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    await reapplySoundboardMicIfNeeded();
     return;
   }
-  if (!load) return;
+  if (!load) {
+    await reapplySoundboardMicIfNeeded();
+    return;
+  }
   for (const [source, sink] of Object.entries(filtered)) {
     if (!sink) continue;
     await runCmd("/usr/bin/pactl", [
@@ -415,6 +477,7 @@ async function applyLoopbacks(state, options = {}) {
       "latency_msec=20",
     ]);
   }
+  await reapplySoundboardMicIfNeeded();
 }
 
 function readStreamLinks() {
@@ -497,7 +560,11 @@ async function setStreamOutput(sink) {
   lines.push("");
   fs.writeFileSync(streamOutputConfigFile, lines.join("\n"));
   fs.writeFileSync(streamOutputStateFile, sink || "");
-  await runCmd("/usr/bin/systemctl", ["--user", "restart", "pipewire-pulse"]);
+  await safeRestartPipewire(["pipewire-pulse"]);
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  await ensureMicSink();
+  await ensureMicSource();
+  await reapplySoundboardMicIfNeeded();
   const links = readStreamLinks();
   await applyStreamLinks(links);
 }
@@ -725,8 +792,12 @@ async function listMvpSinkInputs() {
         const appLine =
           lines.find((l) => l.trim().startsWith("application.name =")) ||
           lines.find((l) => l.trim().startsWith("Application.name ="));
+        const binLine =
+          lines.find((l) => l.trim().startsWith("application.process.binary =")) ||
+          lines.find((l) => l.trim().startsWith("application.process.binary="));
         const app = appLine ? appLine.split("=").slice(1).join("=").trim().replace(/^\"|\"$/g, "") : "";
-        if (/MVP LUNAR|Electron/i.test(app)) {
+        const binary = binLine ? binLine.split("=").slice(1).join("=").trim().replace(/^\"|\"$/g, "") : "";
+        if (/MVP LUNAR|Electron/i.test(app) || binary === "electron") {
           ids.push(id);
         }
       });
@@ -740,7 +811,7 @@ async function applyPipewireSettings(settings, chatSettings) {
   const currentSource = await runCmdOutput("/usr/bin/pactl", ["get-default-source"]);
   writePipewireConfig(settings);
   writeChatFilterConfig(chatSettings || settings);
-  await runCmd("/usr/bin/systemctl", ["--user", "restart", "pipewire", "pipewire-pulse"]);
+  await safeRestartPipewire(["pipewire", "pipewire-pulse"]);
   await new Promise((resolve) => setTimeout(resolve, 800));
   if (currentSink) {
     await runCmd("/usr/bin/pactl", ["set-default-sink", currentSink]);
@@ -757,6 +828,9 @@ async function applyPipewireSettings(settings, chatSettings) {
       await runCmd("/usr/bin/pactl", ["set-default-source", cached]);
     }
   }
+  await ensureMicSink();
+  await ensureMicSource();
+  await reapplySoundboardMicIfNeeded();
 }
 
 async function ensureDefaultLoopbacks() {
@@ -773,9 +847,16 @@ async function ensureDefaultLoopbacks() {
       changed = true;
     }
   });
-  if (changed) {
+  const moduleList = await runCmdOutput("/usr/bin/pactl", ["list", "short", "modules"]);
+  const hasLoopbacks = required.some((source) => moduleList.includes(`source=${source}`));
+  const missing = required.filter((source) => !moduleList.includes(`source=${source}`));
+  if (changed || !hasLoopbacks || missing.length) {
     writeLoopbacks(current);
-    await applyLoopbacks(current, { restart: false });
+    await applyLoopbacks(current, {
+      restart: !hasLoopbacks || missing.length > 0,
+      load: hasLoopbacks && missing.length === 0,
+      writeConfig: true,
+    });
   }
 }
 
@@ -856,13 +937,103 @@ async function setLoopbackMixVolumes({ drySource, wetSource, mix }) {
   }
 }
 
+async function ensureMicSink() {
+  if (!fs.existsSync(micSinkConfigFile)) {
+    const config = [
+      "# MVP Lunar virtual mic sink",
+      "pulse.cmd = [",
+      "  { cmd = \"load-module\" args = \"module-null-sink sink_name=mic sink_properties=device.description=\\\"MVP Lunar Mic\\\"\" }",
+      "]",
+      "",
+    ].join("\n");
+    fs.writeFileSync(micSinkConfigFile, config);
+  }
+  const sinks = await runCmdOutput("/usr/bin/pactl", ["list", "short", "sinks"]);
+  const hasMic = sinks
+    .split("\n")
+    .map((line) => line.trim().split(/\s+/)[1])
+    .filter(Boolean)
+    .includes("mic");
+  if (hasMic) return true;
+  const moduleId = await runCmdOutput("/usr/bin/pactl", [
+    "load-module",
+    "module-null-sink",
+    "sink_name=mic",
+    "sink_properties=device.description=MVP\\ Lunar\\ Mic",
+  ]);
+  if (moduleId) fs.writeFileSync(micSinkFile, moduleId);
+  return Boolean(moduleId);
+}
+
+async function ensureMicSource() {
+  if (!fs.existsSync(micSourceConfigFile)) {
+    const config = [
+      "# MVP Lunar virtual mic source",
+      "pulse.cmd = [",
+      "  { cmd = \"load-module\" args = \"module-remap-source master=mic.monitor source_name=mvp_lunar_mic source_properties=device.description=\\\"MVP Lunar Mic Input\\\"\" }",
+      "]",
+      "",
+    ].join("\n");
+    fs.writeFileSync(micSourceConfigFile, config);
+  }
+  const sources = await runCmdOutput("/usr/bin/pactl", ["list", "short", "sources"]);
+  const hasSource = sources
+    .split("\n")
+    .map((line) => line.trim().split(/\s+/)[1])
+    .filter(Boolean)
+    .includes("mvp_lunar_mic");
+  if (hasSource) return true;
+  const moduleId = await runCmdOutput("/usr/bin/pactl", [
+    "load-module",
+    "module-remap-source",
+    "master=mic.monitor",
+    "source_name=mvp_lunar_mic",
+    "source_properties=device.description=MVP\\ Lunar\\ Mic\\ Input",
+  ]);
+  return Boolean(moduleId);
+}
+
+async function setMicSinkDefaults() {
+  try {
+    await runCmd("/usr/bin/pactl", ["set-sink-mute", "mic", "0"]);
+    await runCmd("/usr/bin/pactl", ["set-sink-volume", "mic", "100%"]);
+  } catch {
+    // ignore
+  }
+}
+
+async function setLoopbackInputVolumeByModule(moduleId, volume = "100%") {
+  if (!moduleId) return;
+  try {
+    const raw = await runCmdOutput("/usr/bin/pactl", ["list", "sink-inputs"]);
+    const blocks = raw.split(/Sink Input #/).filter(Boolean);
+    for (const block of blocks) {
+      const lines = block.split("\n");
+      const id = Number(lines[0].trim());
+      if (!Number.isFinite(id)) continue;
+      const ownerLine = lines.find((l) => l.trim().startsWith("Owner Module:"));
+      const owner = ownerLine ? Number(ownerLine.split(":")[1].trim()) : NaN;
+      if (owner === Number(moduleId)) {
+        await runCmd("/usr/bin/pactl", ["set-sink-input-mute", String(id), "0"]);
+        await runCmd("/usr/bin/pactl", ["set-sink-input-volume", String(id), volume]);
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
 let micLoopbackEnsuring = false;
 const micAuxSources = new Set(["soundboard.monitor", "chat.monitor", "chat_fx_output"]);
 
 async function applyMicLoopback(inputSource, attempt = 0) {
-  return;
   if (micLoopbackEnsuring) return;
   micLoopbackEnsuring = true;
+  const micReady = await ensureMicSink();
+  if (!micReady) {
+    micLoopbackEnsuring = false;
+    return;
+  }
   await unloadModules((mod) => {
     if (mod.name !== "module-loopback") return false;
     if (!mod.args.includes("sink=mic")) return false;
@@ -894,6 +1065,23 @@ async function applyMicLoopback(inputSource, attempt = 0) {
   }
 }
 
+async function resolveMicLoopbackSource() {
+  const state = readState();
+  const fxEnabled = Boolean(state?.audioSettings?.micFxEnabled !== false && (state?.audioSettings?.rnnEnabled || state?.audioSettings?.gateEnabled));
+  if (fxEnabled) {
+    const sources = await runCmdOutput("/usr/bin/pactl", ["list", "short", "sources"]);
+    const hasFx = sources
+      .split("\n")
+      .map((line) => line.trim().split(/\s+/)[1])
+      .filter(Boolean)
+      .includes("mvp_lunar_micfx");
+    if (hasFx) return "mvp_lunar_micfx";
+  }
+  const source = state?.systemInputSource || (await runCmdOutput("/usr/bin/pactl", ["get-default-source"])) || "";
+  if (source && !source.endsWith(".monitor")) return source;
+  return "";
+}
+
 async function clearMicLoopback() {
   if (!fs.existsSync(micLoopbackFile)) return;
   const id = fs.readFileSync(micLoopbackFile, "utf8").trim();
@@ -917,6 +1105,14 @@ async function applySoundboardMic(enabled) {
     fs.rmSync(soundboardMicFile, { force: true });
   }
   if (!enabled) return;
+  const micReady = await ensureMicSink();
+  if (!micReady) return;
+  await ensureMicSource();
+  // Ensure the user's mic is routed into the MVP Lunar Mic sink as well.
+  const micSource = await resolveMicLoopbackSource();
+  if (micSource) {
+    await applyMicLoopback(micSource);
+  }
   const moduleId = await runCmdOutput("/usr/bin/pactl", [
     "load-module",
     "module-loopback",
@@ -924,7 +1120,20 @@ async function applySoundboardMic(enabled) {
     "sink=mic",
     "latency_msec=10",
   ]);
-  if (moduleId) fs.writeFileSync(soundboardMicFile, moduleId);
+  if (moduleId) {
+    fs.writeFileSync(soundboardMicFile, moduleId);
+    await setMicSinkDefaults();
+    await setLoopbackInputVolumeByModule(moduleId, "100%");
+  }
+}
+
+async function reapplySoundboardMicIfNeeded() {
+  const state = readState();
+  if (state?.soundboardMicLink) {
+    await ensureMicSink();
+    await ensureMicSource();
+    await applySoundboardMic(true);
+  }
 }
 
 async function applyChatMic(enabled) {
@@ -986,11 +1195,13 @@ function writeServerConfig(config) {
   fs.writeFileSync(serverConfigFile, JSON.stringify(config, null, 2));
 }
 
-const meterSinks = ["browser", "game", "chat", "soundboard", "mic"];
-const monitorTargets = meterSinks.map((name) => ({ key: name, target: `${name}.monitor` }));
+const meterSinks = ["browser", "game", "chat", "soundboard", "mic", "stream"];
+let monitorTargets = meterSinks.map((name) => ({ key: name, target: `${name}.monitor` }));
 
 const liveLevels = new Map();
 const monitorProcesses = new Map();
+const monitorMeta = new Map();
+const monitorErrors = new Map();
 const sseClients = new Set();
 const defaultLevel = { level: 0, db: -60 };
 
@@ -999,24 +1210,41 @@ function startMonitor({ key, target }) {
     if (!liveLevels.has(key)) {
       liveLevels.set(key, { ...defaultLevel });
     }
-    if (!target || (availableSources.size && !availableSources.has(target))) {
+    if (!target) {
       console.error(`[pw-cat ${key}] missing target ${target || "unknown"}`);
       liveLevels.set(key, { ...defaultLevel });
+      monitorMeta.delete(key);
+      monitorErrors.set(key, `missing target ${target || "unknown"}`);
       return;
     }
-    const proc = spawn("/usr/bin/pw-cat", [
-      "--record",
-      "--format",
-      "f32",
-      "--rate",
-      "48000",
-      "--channels",
-      "2",
-      "--target",
-      target,
-      "-",
-    ]);
+    monitorErrors.delete(key);
+    const runtimeDir =
+      process.env.XDG_RUNTIME_DIR ||
+      (typeof process.getuid === "function" ? `/run/user/${process.getuid()}` : "");
+    const env = { ...process.env };
+    if (runtimeDir) {
+      env.XDG_RUNTIME_DIR = runtimeDir;
+      env.PIPEWIRE_RUNTIME_DIR = env.PIPEWIRE_RUNTIME_DIR || runtimeDir;
+      env.PULSE_RUNTIME_PATH = env.PULSE_RUNTIME_PATH || `${runtimeDir}/pulse`;
+    }
+    const proc = spawn(
+      "/usr/bin/pw-cat",
+      [
+        "--record",
+        "--format",
+        "f32",
+        "--rate",
+        "48000",
+        "--channels",
+        "2",
+        "--target",
+        target,
+        "-",
+      ],
+      { env }
+    );
     monitorProcesses.set(key, proc);
+    monitorMeta.set(key, { target });
     let remainder = Buffer.alloc(0);
 
     proc.stdout.on("data", (chunk) => {
@@ -1046,13 +1274,18 @@ function startMonitor({ key, target }) {
 
     proc.on("exit", () => {
       monitorProcesses.delete(key);
+      monitorMeta.delete(key);
+      monitorErrors.set(key, "capture exited");
       liveLevels.set(key, { ...defaultLevel });
       setTimeout(() => startMonitor({ key, target }), 1500);
     });
 
     proc.stderr.on("data", (chunk) => {
       const msg = chunk.toString().trim();
-      if (msg) console.error(`[pw-cat ${key}] ${msg}`);
+      if (msg) {
+        monitorErrors.set(key, msg);
+        console.error(`[pw-cat ${key}] ${msg}`);
+      }
     });
   } catch {
     // Ignore monitor failures
@@ -1061,6 +1294,83 @@ function startMonitor({ key, target }) {
 
 function startAllMonitors() {
   monitorTargets.forEach((target) => startMonitor(target));
+}
+
+async function listSinksIndexMap() {
+  try {
+    const raw = await runCmdOutput("/usr/bin/pactl", ["list", "short", "sinks"]);
+    const map = new Map();
+    raw
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .forEach((line) => {
+        const parts = line.split(/\s+/);
+        const id = parts[0];
+        const name = parts[1];
+        if (id && name) map.set(id, name);
+      });
+    return map;
+  } catch {
+    return new Map();
+  }
+}
+
+async function listSinkInputNodes() {
+  try {
+    const raw = await runCmdOutput("/usr/bin/pactl", ["list", "sink-inputs"]);
+    const sinkMap = await listSinksIndexMap();
+    const blocks = raw.split(/Sink Input #/).filter(Boolean);
+    return blocks
+      .map((block) => {
+        const lines = block.split("\n");
+        const sinkLine = lines.find((l) => l.trim().startsWith("Sink:"));
+        const sinkId = sinkLine ? sinkLine.split(":")[1].trim() : "";
+        const sink = sinkMap.get(sinkId) || sinkId;
+        const getProp = (key) => {
+          const regex = new RegExp(`\\b${key}\\s*=`);
+          const prop = lines.find((l) => regex.test(l));
+          if (!prop) return "";
+          const idx = prop.indexOf("=");
+          return idx === -1 ? "" : prop.slice(idx + 1).trim().replace(/^\"|\"$/g, "");
+        };
+        const app = getProp("application.name").toLowerCase();
+        const media = getProp("media.name").toLowerCase();
+        const node = getProp("node.name");
+        const objectId = Number(getProp("object.id"));
+        return { sink, app, media, node, nodeId: Number.isFinite(objectId) ? objectId : null };
+      })
+      .filter((entry) => entry.sink);
+  } catch {
+    return [];
+  }
+}
+
+async function updateMonitorTargets() {
+  const sinkInputs = await listSinkInputNodes();
+  const pickNodeForSink = (sinkName) => {
+    const candidate = sinkInputs.find((entry) => {
+      if (entry.sink !== sinkName) return false;
+      const app = entry.app || "";
+      const media = entry.media || "";
+      return !app.includes("pipewire") && !media.includes("loopback");
+    });
+    return candidate || null;
+  };
+  monitorTargets = meterSinks.map((name) => {
+    if (name === "mic") {
+      return { key: name, target: "mic.monitor" };
+    }
+    if (name === "stream") {
+      return { key: name, target: "stream.monitor" };
+    }
+    const node = pickNodeForSink(name);
+    if (node) {
+      const target = node.node || (Number.isFinite(node.nodeId) ? String(node.nodeId) : "");
+      return { key: name, target: target || null };
+    }
+    return { key: name, target: null };
+  });
 }
 
 function broadcastLevels() {
@@ -1114,6 +1424,33 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 200, { ok: true });
   }
 
+  if (req.method === "GET" && req.url === "/api/audio-status") {
+    const now = Date.now();
+    const retryInMs = Math.max(0, pactlState.disabledUntil - now);
+    return sendJson(res, 200, {
+      ok: true,
+      pactlAvailable: canUsePactl(),
+      pactlLastError: pactlState.lastError || "",
+      pactlRetryInSec: retryInMs ? Math.ceil(retryInMs / 1000) : 0,
+      pipewireRestartCooldownSec: Math.ceil(PIPEWIRE_RESTART_COOLDOWN_MS / 1000),
+    });
+  }
+
+  if (req.method === "POST" && req.url === "/api/restart-audio") {
+    const now = Date.now();
+    const elapsed = now - lastPipewireRestartAt;
+    const retryInMs = Math.max(0, PIPEWIRE_RESTART_COOLDOWN_MS - elapsed);
+    if (retryInMs > 0) {
+      return sendJson(res, 200, {
+        ok: true,
+        restarted: false,
+        retryInSec: Math.ceil(retryInMs / 1000),
+      });
+    }
+    await safeRestartPipewire(["pipewire-pulse"]);
+    return sendJson(res, 200, { ok: true, restarted: true });
+  }
+
   if (req.method === "GET" && req.url === "/api/state") {
     const state = readState();
     if (!state) return sendJson(res, 200, { ok: true, state: null });
@@ -1134,6 +1471,11 @@ const server = http.createServer(async (req, res) => {
     const sinks = await listRouteSinks();
     const inputs = await listSinkInputs();
     return sendJson(res, 200, { ok: true, sinks, inputs });
+  }
+
+  if (req.method === "GET" && req.url === "/api/default-sink") {
+    const sink = (await runCmdOutput("/usr/bin/pactl", ["get-default-sink"])) || "";
+    return sendJson(res, 200, { ok: true, sink: sink.trim() });
   }
 
   if (req.method === "GET" && req.url === "/api/mvp-sink-inputs") {
@@ -1345,10 +1687,11 @@ const server = http.createServer(async (req, res) => {
       try {
         const payload = JSON.parse(body || "{}");
         const slotIndex = Number(payload?.slotIndex);
+        const categoryIndex = Number(payload?.categoryIndex);
         if (!Number.isFinite(slotIndex)) {
           return sendJson(res, 400, { ok: false, error: "Missing slotIndex" });
         }
-        enqueueSoundboardEvent("play", slotIndex);
+        enqueueSoundboardEvent("play", slotIndex, categoryIndex);
         return sendJson(res, 200, { ok: true });
       } catch {
         return sendJson(res, 400, { ok: false, error: "Bad JSON" });
@@ -1370,7 +1713,7 @@ const server = http.createServer(async (req, res) => {
         if (slotIndex !== undefined && !Number.isFinite(Number(slotIndex))) {
           return sendJson(res, 400, { ok: false, error: "Bad slotIndex" });
         }
-        enqueueSoundboardEvent("stop", slotIndex === undefined ? null : Number(slotIndex));
+        enqueueSoundboardEvent("stop", slotIndex === undefined ? null : Number(slotIndex), null);
         return sendJson(res, 200, { ok: true });
       } catch {
         return sendJson(res, 400, { ok: false, error: "Bad JSON" });
@@ -1566,7 +1909,7 @@ const server = http.createServer(async (req, res) => {
           current[source] = sink;
         });
         writeLoopbacks(current);
-        await applyLoopbacks(current);
+        await applyLoopbacks(current, { restart: false, load: true, writeConfig: true });
         const state = readState();
         if (state?.chatAudioSettings || state?.audioSettings) {
           const chatSettings = state?.chatAudioSettings || state.audioSettings;
@@ -1590,6 +1933,31 @@ const server = http.createServer(async (req, res) => {
     sseClients.add(res);
     req.on("close", () => sseClients.delete(res));
     return;
+  }
+
+  if (req.method === "GET" && req.url === "/api/levels-snapshot") {
+    const payload = {};
+    meterSinks.forEach((key) => {
+      payload[key] = liveLevels.get(key) || { ...defaultLevel };
+    });
+    return sendJson(res, 200, { ok: true, levels: payload });
+  }
+
+  if (req.method === "GET" && req.url === "/api/levels-debug") {
+    const payload = {};
+    meterSinks.forEach((key) => {
+      payload[key] = {
+        ...(liveLevels.get(key) || { ...defaultLevel }),
+        target: monitorMeta.get(key)?.target || "",
+        error: monitorErrors.get(key) || "",
+      };
+    });
+    return sendJson(res, 200, { ok: true, debug: payload });
+  }
+
+  if (req.method === "GET" && req.url === "/api/sink-inputs-debug") {
+    const entries = await listSinkInputNodes();
+    return sendJson(res, 200, { ok: true, entries });
   }
 
   if (req.method === "POST" && req.url === "/api/state") {
@@ -1632,18 +2000,40 @@ server.listen(port, listenHost, () => {
 });
 
 async function restartMonitors() {
-  monitorProcesses.forEach((proc) => {
-    try {
-      proc.kill();
-    } catch {
-      // ignore
+  await updateMonitorTargets();
+  meterSinks.forEach((key) => {
+    const target = monitorTargets.find((t) => t.key === key);
+    const existing = monitorProcesses.get(key);
+    const meta = monitorMeta.get(key);
+    if (!target || !target.target) {
+      if (existing) {
+        try {
+          existing.kill();
+        } catch {
+          // ignore
+        }
+        monitorProcesses.delete(key);
+      }
+      monitorMeta.delete(key);
+      liveLevels.set(key, { ...defaultLevel });
+      return;
+    }
+    if (!existing || meta?.target !== target.target) {
+      if (existing) {
+        try {
+          existing.kill();
+        } catch {
+          // ignore
+        }
+        monitorProcesses.delete(key);
+      }
+      startMonitor(target);
     }
   });
-  monitorProcesses.clear();
-  startAllMonitors();
 }
 
 restartMonitors();
+setInterval(restartMonitors, 1000);
 setInterval(broadcastLevels, 200);
 
 // Apply persisted loopbacks on startup
@@ -1674,7 +2064,7 @@ if (fs.existsSync(stateFile)) {
       const chatSettings = state?.chatAudioSettings || state.audioSettings;
       writePipewireConfig(state.audioSettings);
       writeChatFilterConfig(chatSettings);
-      runCmd("/usr/bin/systemctl", ["--user", "restart", "pipewire", "pipewire-pulse"]);
+      safeRestartPipewire(["pipewire", "pipewire-pulse"]);
       updateChatLoopbacks(chatSettings);
       ensureDefaultLoopbacks();
     }
@@ -1696,12 +2086,13 @@ setTimeout(() => {
   (async () => {
     ensureDefaultLoopbacks();
     try {
+      await ensureMicSink();
+      await ensureMicSource();
       const state = readState();
       if (state?.chatAudioSettings) {
         updateChatLoopbacks(state.chatAudioSettings);
       }
-      const source =
-        state?.systemInputSource || (await runCmdOutput("/usr/bin/pactl", ["get-default-source"])) || "";
+      const source = await resolveMicLoopbackSource();
       if (source && source !== "mvp_lunar_mic" && !source.endsWith(".monitor")) {
         await applyMicLoopback(source);
       }

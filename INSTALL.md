@@ -13,14 +13,14 @@ This project ships as both an AppImage and a Debian package.
 ## AppImage (CachyOS / Arch-based)
 
 ```
-chmod +x "MVP Lunar-1.0.0.AppImage"
-./MVP\ Lunar-1.0.0.AppImage
+chmod +x "MVP Lunar-1.0.1.AppImage"
+./MVP\ Lunar-1.0.1.AppImage
 ```
 
 ## Debian / Ubuntu
 
 ```
-sudo apt install ./mvp-lunar_1.0.0_amd64.deb
+sudo apt install ./mvp-lunar_1.0.1_amd64.deb
 ```
 
 ## Remote Control (LAN)

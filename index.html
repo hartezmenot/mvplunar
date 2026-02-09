@@ -21,7 +21,13 @@
         </nav>
         <div class="status-group">
           <button class="status-pill stream-btn" id="streamToggle">Stream Mode Off</button>
-          <div class="status-pill app-name" id="appName">MVP LUNAR</div>
+          <div class="status-pill pin-pill">
+            <div class="pin-panel compact" id="pinPanel">
+              <div class="pin-value" id="pinValue">••••</div>
+              <button class="ghost pin-btn" id="pinRefresh">Refresh</button>
+              <button class="ghost pin-btn" id="pinCopy">Copy</button>
+            </div>
+          </div>
           <div class="status-pill" id="syncStatus">Local</div>
           <div class="status-pill remote-pill hidden" id="remoteBadge">Remote</div>
         </div>
@@ -32,6 +38,9 @@
           <div class="page-title" id="pageTitle">Mix</div>
           <div class="page-subtitle">Touch control panel</div>
         </header>
+        <div class="status-banner hidden" id="audioStatus">
+          <span class="status-banner-text">Audio service unavailable.</span>
+        </div>
 
         <section class="page" id="page-sonar">
           <div class="panel-grid">
@@ -46,6 +55,7 @@
                   </div>
                   <input class="rocker-range sink-slider" type="range" min="0" max="100" value="65" data-channel="browser" />
                   <div class="sink-percent" data-percent="browser">Volume 65%</div>
+                  <div class="peak-meter" data-meter="browser"><div class="peak-meter-fill"></div></div>
                 </div>
                 <div class="sink-card" data-sink="game">
                   <div class="sink-label">Game</div>
@@ -55,6 +65,7 @@
                   </div>
                   <input class="rocker-range sink-slider" type="range" min="0" max="100" value="70" data-channel="game" />
                   <div class="sink-percent" data-percent="game">Volume 70%</div>
+                  <div class="peak-meter" data-meter="game"><div class="peak-meter-fill"></div></div>
                 </div>
                 <div class="sink-card" data-sink="chat_fx">
                   <div class="sink-label">Chat</div>
@@ -64,6 +75,7 @@
                   </div>
                   <input class="rocker-range sink-slider" type="range" min="0" max="100" value="60" data-channel="chat" />
                   <div class="sink-percent" data-percent="chat">Volume 60%</div>
+                  <div class="peak-meter" data-meter="chat"><div class="peak-meter-fill"></div></div>
                 </div>
                 <div class="sink-card" data-sink="mic">
                   <div class="sink-label">Mic Input</div>
@@ -73,6 +85,7 @@
                   </div>
                   <input class="rocker-range sink-slider" type="range" min="0" max="100" value="68" data-channel="mic" />
                   <div class="sink-percent" data-percent="mic">Volume 68%</div>
+                  <div class="peak-meter" data-meter="mic"><div class="peak-meter-fill"></div></div>
                 </div>
                 <div class="sink-card" data-sink="soundboard">
                   <div class="sink-label">Soundboard</div>
@@ -82,6 +95,7 @@
                   </div>
                   <input class="rocker-range sink-slider" type="range" min="0" max="100" value="55" data-channel="soundboard" />
                   <div class="sink-percent" data-percent="soundboard">Volume 55%</div>
+                  <div class="peak-meter" data-meter="soundboard"><div class="peak-meter-fill"></div></div>
                 </div>
                 <div class="sink-card stream-card stream-only" data-sink="stream">
                   <div class="sink-label">Stream</div>
@@ -90,6 +104,7 @@
                   </div>
                   <input class="rocker-range sink-slider" type="range" min="0" max="100" value="65" data-channel="stream" />
                   <div class="sink-percent" data-percent="stream">Volume 65%</div>
+                  <div class="peak-meter" data-meter="stream"><div class="peak-meter-fill"></div></div>
                 </div>
               </div>
             </div>
@@ -200,16 +215,7 @@
                   </div>
                 </div>
                 <div class="settings-section">
-                  <div class="section-title">Web PIN</div>
-                  <div class="row">
-                    <label>Web PIN</label>
-                    <div class="pin-panel" id="pinPanel">
-                      <div class="pin-value" id="pinValue">••••</div>
-                      <button class="ghost pin-btn" id="pinToggle">Show</button>
-                      <button class="ghost pin-btn" id="pinRefresh">Refresh</button>
-                      <button class="ghost pin-btn" id="pinCopy">Copy</button>
-                    </div>
-                  </div>
+                  <div class="section-title">Web Access</div>
                   <div class="row">
                     <label>LAN Access</label>
                     <div class="gate-row">
@@ -243,6 +249,7 @@
               <div class="soundboard-master-title">Soundboard Volume</div>
               <input class="rocker-range soundboard-master-slider" id="soundboardMaster" type="range" min="0" max="100" value="100" />
               <div class="soundboard-master-value" id="soundboardMasterValue">100%</div>
+              <div class="peak-meter" data-meter="soundboard"><div class="peak-meter-fill"></div></div>
             </div>
           </div>
         </section>
@@ -270,7 +277,11 @@
     <template id="slotTemplate">
       <div class="slot">
         <div class="slot-top">
-          <div class="slot-name">Empty</div>
+          <div>
+            <div class="slot-name">Empty</div>
+            <div class="slot-bind hidden"></div>
+          </div>
+          <button class="slot-edit-inline edit">Edit</button>
         </div>
         <div class="slot-actions">
           <button class="play">Play</button>
@@ -284,10 +295,6 @@
         <div class="slot-add">
           <button class="plus">+</button>
         </div>
-        <div class="slot-edit">
-          <button class="edit">Edit</button>
-          <button class="delete">Delete</button>
-        </div>
       </div>
     </template>
 
@@ -300,12 +307,18 @@
           <label for="soundNameInput">Name</label>
           <input id="soundNameInput" type="text" placeholder="Sound name" />
         </div>
+        <div class="sound-meta-row">
+          <label for="soundBindInput">Bind</label>
+          <input id="soundBindInput" type="text" placeholder="Press keys to bind" readonly />
+          <div class="sound-meta-hint">Press a key combo. Backspace clears.</div>
+        </div>
         <div class="sound-meta-row hidden" id="soundCategoryRow">
           <label for="soundCategorySelect">Category</label>
           <select id="soundCategorySelect"></select>
         </div>
         <div class="sound-meta-actions">
           <button class="ghost" id="soundMetaCancel">Cancel</button>
+          <button class="ghost delete hidden" id="soundMetaDelete">Delete</button>
           <button class="ghost" id="soundMetaSave">Save</button>
         </div>
       </div>

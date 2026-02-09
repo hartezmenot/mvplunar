@@ -1,14 +1,14 @@
 {
-  "browser": {
+  "mic": {
     "enabled": true,
-    "moduleId": "536870930"
+    "moduleId": "536870932"
   },
   "soundboard": {
     "enabled": true,
-    "moduleId": "536870929"
+    "moduleId": "536870933"
   },
-  "mic": {
+  "browser": {
     "enabled": true,
-    "moduleId": "536870927"
+    "moduleId": "536870934"
   }
 }
