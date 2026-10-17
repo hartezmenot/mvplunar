@@ -1,59 +1,66 @@
 # MVP Lunar
 
-A high-performance audio control suite built with care, love, and perfection for the Linux community.
+MVP Lunar is an audio control suite inspired by SteelSeries GG Sonar and VoiceMeeter. The current project supports Linux audio routing through PipeWire and provides a Windows desktop build for its soundboard and control interface.
 
-Inspired by SteelSeries GG Sonar and VoiceMeeter, MVP Lunar is an all-in-one mixing and routing solution designed to empower streamers, gamers, and power users on Linux.
+## Features
 
-## 🚀 Key Features
+- Per app mixing, device routing, audio meters, stream mixes, and microphone processing on Linux with PipeWire and `pipewire-pulse`.
+- Local soundboard with custom clips, categories, per clip volume, output selection, and keyboard shortcuts.
+- Remote control from a phone, tablet, or another computer over your local network.
+- Saved settings and soundboard clips.
 
-- Advanced Mix Engine: Seamlessly control individual application volumes. Includes a dedicated Stream Mode—perfect for toggling what your audience hears versus your personal monitor mix.
-- Intelligent Routing: Dynamically route active audio applications to specific outputs without touching complex system menus.
-- Integrated Soundboard: Add and trigger custom sound effects instantly to enhance your content.
-- Remote Control Deck: Transform your tablet, laptop, or touchscreen monitor into a physical control panel. Enable LAN settings to manage your mix wirelessly via a local web interface.
+## Platform support
 
-## 🐧 Linux Support
+### Linux
 
-- Wayland: Fully supported and primary testing environment (best experience).
-- X11 / Xorg: Currently untested. If you run an X11 session, we would love your feedback and bug reports to help reach perfection.
+The full audio mixer requires PipeWire, `pipewire-pulse`, and WirePlumber. RNNoise noise suppression also requires an RNNoise LV2 plugin such as `noise-suppression-for-voice`.
 
-## ✅ Requirements
+Wayland is the primary desktop environment. X11 is available but has not been tested as extensively.
 
-- PipeWire audio stack
-- `pipewire-pulse` (PulseAudio compatibility)
-- `wireplumber` session manager
-- RNNoise LV2 plugin for noise suppression (optional, but required for the RNNoise toggle):
-  - `noise-suppression-for-voice` (package name varies by distro)
+### Windows
 
-## 🛠 Setup & Remote Access
+The Windows desktop app, local soundboard playback, keyboard shortcuts, saved settings, and LAN control are available. Live application mixing and routing, PipeWire meters, virtual mixer devices, and microphone effects currently require Linux with PipeWire.
 
-- Enable LAN: Navigate to Settings and toggle the LAN settings to "On."
-- Connect Device: Open a browser on your remote device (tablet/laptop).
-- Enter Address: Type your host PC's local IP followed by the dedicated port:
+Build the installer from a Windows machine with Node.js installed:
 
+```powershell
+npm ci
+npm run build:win
 ```
+
+The installer is written to `dist/`. For an unpacked portable executable, run `npm run build:win:portable`.
+The Windows build workflow also stores the installer as a GitHub Actions artifact for 30 days.
+
+To run the desktop app from a checkout:
+
+```powershell
+npm ci
+npm run app:windows
+```
+
+The app keeps Windows settings and soundboard clips in the per user application data folder. The packaged app does not include the checkout's local `data/` files.
+
+## Remote control
+
+Enable LAN in Settings, then visit the host computer's local IP and port 1130 from another device:
+
+```text
 http://<YOUR_LOCAL_IP>:1130
 ```
 
-## 🧡 Support the Project
+## Linux packages
 
-MVP Lunar is—and will always remain—free. This app is a labor of love, built to provide a professional audio experience for everyone. If you love using it and want to support its continued development:
+Build both supported Linux packages with:
 
-Support the project: https://ko-fi.com/hartezmenot
+```bash
+npm ci
+npm run build:linux
+```
 
-Feedback is welcome! Please do not be afraid to comment or open an issue if you find anything that isn't perfect.
+On most Linux systems, the AppImage can be launched directly. The Debian package installs a desktop entry.
 
-## ✅ Release Notes
+## Support
 
-### 1.0.1
+MVP Lunar is free and open source under the MIT license. Feedback and bug reports are welcome.
 
-- Cleaner UI polish across the main panels.
-- PIN display streamlined (tap/hover to reveal).
-- Audio status banner for pactl availability and retry timing.
-- Peak meter behavior fixes and consistent dB styling.
-- Stream meter now reflects linked sources.
-- Routing overrides to prevent sinks snapping back.
-
-## Desktop Entry
-
-On most Linux systems, the AppImage will prompt to integrate into your app menu. If not, you can still run it directly.
-The `.deb` package should install a desktop entry automatically.
+Support the project: <https://ko-fi.com/hartezmenot>

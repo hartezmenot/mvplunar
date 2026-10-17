@@ -89,6 +89,11 @@ function startAudioStatusPoll() {
         setAudioStatus("Audio status unknown.");
         return;
       }
+      if (data.audioSupported === false) {
+        audioAvailable = false;
+        setAudioStatus(data.audioMessage || "Live audio mixing is not available on this platform yet.");
+        return;
+      }
       if (!data.pactlAvailable) {
         audioAvailable = false;
         const err = data.pactlLastError ? ` (${data.pactlLastError})` : "";

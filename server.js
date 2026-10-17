@@ -4,7 +4,8 @@ const path = require("path");
 const { spawn } = require("child_process");
 
 const root = __dirname;
-const dataDir = path.join(root, "data");
+const isLinuxAudio = process.platform === "linux";
+const dataDir = process.env.MVP_LUNAR_DATA_DIR || path.join(root, "data");
 const stateFile = path.join(dataDir, "state.json");
 const pipewireConfigDir = path.join(process.env.HOME || root, ".config/pipewire/pipewire.conf.d");
 const pipewirePulseConfigDir = path.join(process.env.HOME || root, ".config/pipewire/pipewire-pulse.conf.d");
@@ -28,9 +29,6 @@ const chatFxFeedFile = path.join(dataDir, "chat-fx-feed.txt");
 const soundboardQueue = [];
 const maxSoundboardQueue = 100;
 const port = process.env.PORT ? Number(process.env.PORT) : 1130;
-const serverConfig = readServerConfig();
-// Always rotate PIN on server start (app restart/reboot).
-refreshPin();
 
 const PACTL_COOLDOWN_MS = 5000;
 const PIPEWIRE_RESTART_COOLDOWN_MS = 15000;
@@ -40,12 +38,14 @@ let lastPipewireRestartAt = 0;
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
 }
-if (!fs.existsSync(pipewireConfigDir)) {
+if (isLinuxAudio && !fs.existsSync(pipewireConfigDir)) {
   fs.mkdirSync(pipewireConfigDir, { recursive: true });
 }
-if (!fs.existsSync(pipewirePulseConfigDir)) {
+if (isLinuxAudio && !fs.existsSync(pipewirePulseConfigDir)) {
   fs.mkdirSync(pipewirePulseConfigDir, { recursive: true });
 }
+// Always rotate PIN on server start (app restart/reboot).
+refreshPin();
 
 function enqueueSoundboardEvent(type, slotIndex, categoryIndex) {
   const event = {
@@ -1419,9 +1419,36 @@ function serveFile(res, filePath) {
   }
 }
 
+const windowsAvailableRoutes = new Set([
+  "/api/ping",
+  "/api/audio-status",
+  "/api/state",
+  "/api/server-config",
+  "/api/pin",
+  "/api/pin-refresh",
+  "/api/pin-verify",
+  "/api/soundboard-play",
+  "/api/soundboard-stop",
+  "/api/soundboard-queue",
+  "/api/levels",
+  "/api/levels-snapshot",
+]);
+
 const server = http.createServer(async (req, res) => {
+  const route = req.url.split("?")[0];
+  if (!isLinuxAudio && route.startsWith("/api/") && !windowsAvailableRoutes.has(route)) {
+    return sendJson(res, 501, {
+      ok: false,
+      error: "Live audio routing and processing currently require Linux with PipeWire.",
+    });
+  }
+
   if (req.method === "GET" && req.url === "/api/ping") {
-    return sendJson(res, 200, { ok: true });
+    return sendJson(res, 200, {
+      ok: true,
+      platform: process.platform,
+      audioBackend: isLinuxAudio ? "pipewire" : "unavailable",
+    });
   }
 
   if (req.method === "GET" && req.url === "/api/audio-status") {
@@ -1429,7 +1456,12 @@ const server = http.createServer(async (req, res) => {
     const retryInMs = Math.max(0, pactlState.disabledUntil - now);
     return sendJson(res, 200, {
       ok: true,
-      pactlAvailable: canUsePactl(),
+      audioSupported: isLinuxAudio,
+      audioBackend: isLinuxAudio ? "pipewire" : "unavailable",
+      audioMessage: isLinuxAudio
+        ? ""
+        : "Windows desktop and soundboard are available. Live app mixing, routing, meters, and mic effects currently require Linux with PipeWire.",
+      pactlAvailable: isLinuxAudio && canUsePactl(),
       pactlLastError: pactlState.lastError || "",
       pactlRetryInSec: retryInMs ? Math.ceil(retryInMs / 1000) : 0,
       pipewireRestartCooldownSec: Math.ceil(PIPEWIRE_RESTART_COOLDOWN_MS / 1000),
@@ -1815,7 +1847,7 @@ const server = http.createServer(async (req, res) => {
         const enabled = Boolean(payload?.lanEnabled);
         writeServerConfig({ lanEnabled: enabled });
         sendJson(res, 200, { ok: true });
-        setTimeout(() => process.exit(0), 300);
+        restartServerBinding(enabled);
       } catch {
         return sendJson(res, 400, { ok: false, error: "Bad JSON" });
       }
@@ -1994,11 +2026,6 @@ const server = http.createServer(async (req, res) => {
   return serveFile(res, fullPath);
 });
 
-const listenHost = serverConfig.lanEnabled ? "0.0.0.0" : "127.0.0.1";
-server.listen(port, listenHost, () => {
-  console.log(`MVP LUNAR server running on ${listenHost}:${port}`);
-});
-
 async function restartMonitors() {
   await updateMonitorTargets();
   meterSinks.forEach((key) => {
@@ -2032,66 +2059,79 @@ async function restartMonitors() {
   });
 }
 
-restartMonitors();
-setInterval(restartMonitors, 1000);
-setInterval(broadcastLevels, 200);
+let monitorInterval = null;
+let levelInterval = null;
+let pipewireStartupTimer = null;
+let micCheckInterval = null;
 
-// Apply persisted loopbacks on startup
-const savedLoopbacks = readLoopbacks();
-if (Object.keys(savedLoopbacks).length) {
-  applyLoopbacks(savedLoopbacks);
-} else {
-  ensureDefaultLoopbacks();
+function listen(host) {
+  server.listen(port, host, () => {
+    console.log(`MVP LUNAR server running on ${host}:${port}`);
+  });
 }
 
-// Apply persisted stream links on startup
-const savedStreamLinks = readStreamLinks();
-if (Object.keys(savedStreamLinks).length) {
-  applyStreamLinks(savedStreamLinks);
+function restartServerBinding(lanEnabled) {
+  const host = lanEnabled ? "0.0.0.0" : "127.0.0.1";
+  setTimeout(() => {
+    if (!server.listening) {
+      listen(host);
+      return;
+    }
+    server.close(() => listen(host));
+    // End the levels stream too so the server can rebind after a LAN change.
+    server.closeAllConnections?.();
+  }, 300);
 }
-if (fs.existsSync(streamOutputStateFile)) {
-  const sink = fs.readFileSync(streamOutputStateFile, "utf8").trim();
-  if (sink) {
-    setStreamOutput(sink);
+
+function startPipewireServices() {
+  restartMonitors();
+  monitorInterval = setInterval(restartMonitors, 1000);
+  levelInterval = setInterval(broadcastLevels, 200);
+
+  const savedLoopbacks = readLoopbacks();
+  if (Object.keys(savedLoopbacks).length) {
+    applyLoopbacks(savedLoopbacks);
+  } else {
+    ensureDefaultLoopbacks();
   }
-}
 
-// Apply soundboard->mic link from saved app state
-if (fs.existsSync(stateFile)) {
-  try {
-    const state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
-    if (state?.audioSettings) {
-      const chatSettings = state?.chatAudioSettings || state.audioSettings;
-      writePipewireConfig(state.audioSettings);
-      writeChatFilterConfig(chatSettings);
-      safeRestartPipewire(["pipewire", "pipewire-pulse"]);
-      updateChatLoopbacks(chatSettings);
-      ensureDefaultLoopbacks();
-    }
-    if (state?.systemInputSource && !state.systemInputSource.endsWith(".monitor")) {
-      applyMicLoopback(state.systemInputSource);
-    }
-    if (state?.soundboardMicLink) {
-      applySoundboardMic(true);
-    }
-    if (state?.chatMicLink) {
-      applyChatMic(true);
-    }
-  } catch {
-    // ignore
+  const savedStreamLinks = readStreamLinks();
+  if (Object.keys(savedStreamLinks).length) {
+    applyStreamLinks(savedStreamLinks);
   }
-}
+  if (fs.existsSync(streamOutputStateFile)) {
+    const sink = fs.readFileSync(streamOutputStateFile, "utf8").trim();
+    if (sink) setStreamOutput(sink);
+  }
 
-setTimeout(() => {
-  (async () => {
+  if (fs.existsSync(stateFile)) {
+    try {
+      const state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+      if (state?.audioSettings) {
+        const chatSettings = state?.chatAudioSettings || state.audioSettings;
+        writePipewireConfig(state.audioSettings);
+        writeChatFilterConfig(chatSettings);
+        safeRestartPipewire(["pipewire", "pipewire-pulse"]);
+        updateChatLoopbacks(chatSettings);
+        ensureDefaultLoopbacks();
+      }
+      if (state?.systemInputSource && !state.systemInputSource.endsWith(".monitor")) {
+        applyMicLoopback(state.systemInputSource);
+      }
+      if (state?.soundboardMicLink) applySoundboardMic(true);
+      if (state?.chatMicLink) applyChatMic(true);
+    } catch {
+      // ignore
+    }
+  }
+
+  pipewireStartupTimer = setTimeout(async () => {
     ensureDefaultLoopbacks();
     try {
       await ensureMicSink();
       await ensureMicSource();
       const state = readState();
-      if (state?.chatAudioSettings) {
-        updateChatLoopbacks(state.chatAudioSettings);
-      }
+      if (state?.chatAudioSettings) updateChatLoopbacks(state.chatAudioSettings);
       const source = await resolveMicLoopbackSource();
       if (source && source !== "mvp_lunar_mic" && !source.endsWith(".monitor")) {
         await applyMicLoopback(source);
@@ -2099,13 +2139,40 @@ setTimeout(() => {
     } catch {
       // ignore
     }
-  })();
-}, 1500);
+  }, 1500);
 
-setInterval(() => {
-  micLoopbackPresent()
-    .then(async (present) => {
-      return;
-    })
-    .catch(() => {});
-}, 5000);
+  micCheckInterval = setInterval(() => {
+    micLoopbackPresent().catch(() => {});
+  }, 5000);
+}
+
+function startServer() {
+  if (!server.listening) {
+    const host = readServerConfig().lanEnabled ? "0.0.0.0" : "127.0.0.1";
+    listen(host);
+  }
+  if (isLinuxAudio && !monitorInterval) startPipewireServices();
+}
+
+function stopServer() {
+  clearInterval(monitorInterval);
+  clearInterval(levelInterval);
+  clearInterval(micCheckInterval);
+  clearTimeout(pipewireStartupTimer);
+  monitorInterval = null;
+  levelInterval = null;
+  micCheckInterval = null;
+  pipewireStartupTimer = null;
+  monitorProcesses.forEach((proc) => proc.kill());
+  monitorProcesses.clear();
+  sseClients.forEach((client) => client.end());
+  sseClients.clear();
+  if (server.listening) {
+    server.close();
+    server.closeAllConnections?.();
+  }
+}
+
+if (require.main === module) startServer();
+
+module.exports = { startServer, stopServer };

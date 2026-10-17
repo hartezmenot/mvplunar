@@ -6,9 +6,9 @@ const { spawn } = require("child_process");
 
 const serverPath = path.join(__dirname, "server.js");
 const port = process.env.PORT ? Number(process.env.PORT) : 1130;
-const stateFile = path.join(__dirname, "data", "state.json");
+let stateFile = path.join(__dirname, "data", "state.json");
 
-let serverProcess = null;
+let serverModule = null;
 let mainWindow = null;
 let tray = null;
 let lastShortcutStamp = 0;
@@ -23,20 +23,20 @@ const isWayland =
   Boolean(process.env.WAYLAND_DISPLAY);
 
 function startServer() {
-  if (serverProcess) return;
-  serverProcess = spawn("/usr/bin/node", [serverPath], {
-    stdio: "inherit",
-    env: { ...process.env, PORT: String(port) },
-  });
-  serverProcess.on("exit", () => {
-    serverProcess = null;
-  });
+  if (serverModule) return;
+  const dataDir = app.isPackaged ? app.getPath("userData") : path.join(__dirname, "data");
+  fs.mkdirSync(dataDir, { recursive: true });
+  stateFile = path.join(dataDir, "state.json");
+  process.env.MVP_LUNAR_DATA_DIR = dataDir;
+  process.env.PORT = String(port);
+  serverModule = require(serverPath);
+  serverModule.startServer();
 }
 
 function stopServer() {
-  if (!serverProcess) return;
-  serverProcess.kill();
-  serverProcess = null;
+  if (!serverModule) return;
+  serverModule.stopServer();
+  serverModule = null;
 }
 
 function waitForServer(timeoutMs = 10000) {
@@ -459,15 +459,17 @@ function createTray() {
   tray.setContextMenu(menu);
 }
 
-app.commandLine.appendSwitch("ozone-platform-hint", "auto");
-if (isWayland) {
-  app.commandLine.appendSwitch("ozone-platform", "wayland");
-  app.commandLine.appendSwitch(
-    "enable-features",
-    "UseOzonePlatform,WaylandWindowDecorations,GlobalShortcutsPortal"
-  );
-} else {
-  app.commandLine.appendSwitch("enable-features", "GlobalShortcutsPortal");
+if (process.platform === "linux") {
+  app.commandLine.appendSwitch("ozone-platform-hint", "auto");
+  if (isWayland) {
+    app.commandLine.appendSwitch("ozone-platform", "wayland");
+    app.commandLine.appendSwitch(
+      "enable-features",
+      "UseOzonePlatform,WaylandWindowDecorations,GlobalShortcutsPortal"
+    );
+  } else {
+    app.commandLine.appendSwitch("enable-features", "GlobalShortcutsPortal");
+  }
 }
 app.commandLine.appendSwitch("disable-gpu");
 app.disableHardwareAcceleration();

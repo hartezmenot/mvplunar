@@ -2,7 +2,7 @@
   "name": "mvp-lunar",
   "version": "1.0.1",
   "description": "MVP Lunar audio mixer and soundboard controller",
-  "homepage": "https://github.com/hartezmenot/mvp-lunar",
+  "homepage": "https://github.com/hartezmenot/mvplunar",
   "author": {
     "name": "hartezmenot",
     "email": "chaox.league@gmail.com"
@@ -13,11 +13,15 @@
   "scripts": {
     "start": "node server.js",
     "app": "electron .",
-    "app:dev": "ELECTRON_OZONE_PLATFORM_HINT=auto electron .",
-    "app:linux": "ELECTRON_OZONE_PLATFORM_HINT=auto electron .",
+    "app:dev": "electron .",
+    "app:linux": "electron .",
+    "app:windows": "electron .",
     "build:appimage": "electron-builder --linux AppImage",
     "build:deb": "electron-builder --linux deb",
-    "build:linux": "electron-builder --linux AppImage deb"
+    "build:linux": "electron-builder --linux AppImage deb",
+    "build:win": "electron-builder --win nsis",
+    "build:win:portable": "electron-builder --win portable",
+    "build:windows": "electron-builder --win nsis portable"
   },
   "devDependencies": {
     "electron": "^31.3.1",
@@ -27,6 +31,25 @@
     "appId": "com.mvp.lunar",
     "productName": "MVP Lunar",
     "icon": "assets/icon.png",
+    "files": [
+      "**/*",
+      "!data/**",
+      "!.github/**",
+      "!app.js.bak"
+    ],
+    "win": {
+      "icon": "assets/icon.ico",
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "perMachine": false
+    },
     "linux": {
       "maintainer": "hartezmenot <chaox.league@gmail.com>",
       "icon": "assets/icon.png",
